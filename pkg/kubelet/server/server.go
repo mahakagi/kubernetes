@@ -560,8 +560,7 @@ func (s *Server) InstallAuthRequiredHandlers() {
 
 	s.addMetricsBucketMatcher("containerLogs")
 	ws = new(restful.WebService)
-	ws.
-		Path("/containerLogs")
+	ws.Path("/containerLogs")
 	ws.Route(ws.GET("/{podNamespace}/{podID}/{containerName}").
 		To(s.getContainerLogs).
 		Operation("getContainerLogs"))

@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/endpointslice/metrics"
 	endpointsliceutil "k8s.io/endpointslice/util"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/v1/endpoints"
@@ -45,6 +46,7 @@ import (
 	api "k8s.io/kubernetes/pkg/apis/core"
 	helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/controller"
+	constants "k8s.io/kubernetes/pkg/util/constants"
 	utillabels "k8s.io/kubernetes/pkg/util/labels"
 	utilnet "k8s.io/utils/net"
 )
@@ -76,7 +78,7 @@ const (
 
 // NewEndpointController returns a new *Controller.
 func NewEndpointController(ctx context.Context, podInformer coreinformers.PodInformer, serviceInformer coreinformers.ServiceInformer,
-	endpointsInformer coreinformers.EndpointsInformer, client clientset.Interface, endpointUpdatesBatchPeriod time.Duration) *Controller {
+	endpointsInformer coreinformers.EndpointsInformer, nodeInformer coreinformers.NodeInformer, client clientset.Interface, endpointUpdatesBatchPeriod time.Duration) *Controller {
 	broadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: ControllerName})
 
@@ -114,6 +116,8 @@ func NewEndpointController(ctx context.Context, podInformer coreinformers.PodInf
 	})
 	e.endpointsLister = endpointsInformer.Lister()
 	e.endpointsSynced = endpointsInformer.Informer().HasSynced
+
+	e.nodeLister = nodeInformer.Lister()
 
 	e.staleEndpointsTracker = newStaleEndpointsTracker()
 	e.triggerTimeTracker = endpointsliceutil.NewTriggerTimeTracker()
@@ -153,6 +157,10 @@ type Controller struct {
 	endpointsSynced cache.InformerSynced
 	// staleEndpointsTracker can help determine if a cached Endpoints is out of date.
 	staleEndpointsTracker *staleEndpointsTracker
+
+	// nodeLister is able to list/get pods and is populated by the shared informer passed to
+	// NewEndpointController.
+	nodeLister corelisters.NodeLister
 
 	// Services that need to be updated. A channel is inappropriate here,
 	// because it allows services with lots of pods to be serviced much
@@ -326,6 +334,7 @@ func (e *Controller) handleErr(logger klog.Logger, err error, key string) {
 	}
 
 	ns, name, keyErr := cache.SplitMetaNamespaceKey(key)
+	metrics.EpReconciliationErrors.WithLabelValues(name, ns).Inc()
 	if keyErr != nil {
 		logger.Error(err, "Failed to split meta namespace cache key", "key", key)
 	}
@@ -402,6 +411,24 @@ func (e *Controller) syncService(ctx context.Context, key string) error {
 	var totalReadyEps int
 	var totalNotReadyEps int
 
+	// Kube-proxy looks at endpointslices and endpoints to setup iptable rules on the node
+	// If an address is missing in endpoints or endpoints in endpointslices k-proxy wont setup iptable rules
+	// We have a codepath different for endpoints and endpointslices so we need to patch both to have consistent addresses
+	// We SyncService for every pod/svc/node change, we can reliably use pods for svc and their nodes to decide AZ spread as they dont change
+	// Note: These operations do not gurantee atomicity so it wont prevent multi-zone weigh away case
+	// However az-poller ensures SRB operations on a cluster is atomic - https://gitlab.aws.dev/eks-dataplane/eks-dataplane-az-poller/-/merge_requests/52
+	impairedZone := ""
+	multiAZSpread := false
+	if z, exists := service.Labels[constants.ImpairedZoneLabel]; exists {
+		multiAZSpread = endpointsliceutil.SvcPodsHaveMultiAZSpread(pods, e.nodeLister)
+		if multiAZSpread {
+			logger.V(2).Info("Pods will be weighed away for the Service", "service", klog.KObj(service))
+		} else {
+			logger.V(2).Info("Pods will not be weighed away for the Service as they are not spread across AZs.", "service", klog.KObj(service))
+		}
+		impairedZone = z
+	}
+
 	for _, pod := range pods {
 		if !endpointsliceutil.ShouldPodBeInEndpoints(pod, service.Spec.PublishNotReadyAddresses) {
 			logger.V(5).Info("Pod is not included on endpoints for Service", "pod", klog.KObj(pod), "service", klog.KObj(service))
@@ -413,6 +440,18 @@ func (e *Controller) syncService(ctx context.Context, key string) error {
 			// this will happen, if the cluster runs with some nodes configured as dual stack and some as not
 			// such as the case of an upgrade..
 			logger.V(2).Info("Failed to find endpoint for service with ClusterIP on pod with error", "service", klog.KObj(service), "clusterIP", service.Spec.ClusterIP, "pod", klog.KObj(pod), "error", err)
+			continue
+		}
+
+		// We dont have zone info in endpoint obj so we need to figure out the zone where pod is in based on its node
+		node, err := e.nodeLister.Get(pod.Spec.NodeName)
+		if err != nil {
+			// NodeInfo is only used to check the zone pod belongs to for SRB wf
+			// if we dont find nodeInfo then we ignore and continue adding the pod endpoint
+			logger.V(4).Info("Failed to find node for pod", "pod", klog.KObj(pod), "error", err)
+		} else if multiAZSpread && node.Labels[v1.LabelTopologyZone] == impairedZone {
+			metrics.EpEndpointsRemovedByZoneLabel.WithLabelValues(service.Name, service.Namespace, impairedZone).Inc()
+			logger.V(2).Info("Pod endpoint will be removed from endpoint for the Service", "pod", klog.KObj(pod), "service", klog.KObj(service))
 			continue
 		}
 

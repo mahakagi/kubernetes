@@ -20,14 +20,30 @@ import (
 	"slices"
 	"strings"
 
+	"fmt"
+	"os"
+
 	"github.com/blang/semver/v4"
+
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/validation"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"k8s.io/kubernetes/pkg/apis/coordination"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
+	az "k8s.io/kubernetes/pkg/kubeapiserver/az"
 )
+
+var eksManagedLeaseNames = map[string]struct{}{
+	"kube-scheduler":                       {},
+	"kube-controller-manager":              {},
+	"cloud-controller-manager":             {},
+	"eks-certificates-controller":          {},
+	"fargate-scheduler":                    {},
+	"cp-vpc-resource-controller":           {},
+	"amazon-network-policy-controller-k8s": {},
+}
 
 var validLeaseStrategies = []coordination.CoordinatedLeaseStrategy{coordination.OldestEmulationVersion}
 
@@ -35,6 +51,7 @@ var validLeaseStrategies = []coordination.CoordinatedLeaseStrategy{coordination.
 func ValidateLease(lease *coordination.Lease) field.ErrorList {
 	allErrs := validation.ValidateObjectMeta(&lease.ObjectMeta, true, validation.NameIsDNSSubdomain, field.NewPath("metadata"))
 	allErrs = append(allErrs, ValidateLeaseSpec(&lease.Spec, field.NewPath("spec"))...)
+	allErrs = append(allErrs, validateAZ(lease)...)
 	return allErrs
 }
 
@@ -42,6 +59,7 @@ func ValidateLease(lease *coordination.Lease) field.ErrorList {
 func ValidateLeaseUpdate(lease, oldLease *coordination.Lease) field.ErrorList {
 	allErrs := validation.ValidateObjectMetaUpdate(&lease.ObjectMeta, &oldLease.ObjectMeta, field.NewPath("metadata"))
 	allErrs = append(allErrs, ValidateLeaseSpec(&lease.Spec, field.NewPath("spec"))...)
+	allErrs = append(allErrs, validateAZ(lease)...)
 	return allErrs
 }
 
@@ -161,6 +179,50 @@ func ValidateCoordinatedLeaseStrategy(strategy coordination.CoordinatedLeaseStra
 				allErrs = append(allErrs, field.Invalid(fldPath.Child("strategy"), strategy, msg))
 			}
 		}
+	}
+	return allErrs
+}
+
+/*
+ * validateAZ function blocks lease update during a zonal outage.
+ * https://quip-amazon.com/0k7FAEo7j60v/Stop-software-operations-in-the-impacted-AZ
+ */
+func validateAZ(lease *coordination.Lease) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if _, ok := eksManagedLeaseNames[lease.GetName()]; !ok {
+		return allErrs
+	}
+
+	if lease.GetNamespace() != "kube-system" {
+		return allErrs
+	}
+
+	metadata, err := meta.Accessor(&lease.ObjectMeta)
+	if err != nil {
+		allErrs = append(allErrs, &field.Error{
+			Type:     field.ErrorTypeInvalid,
+			Field:    "objectMeta",
+			BadValue: lease.ObjectMeta,
+			Detail:   "object does not implement the Object interfaces",
+		})
+		return allErrs
+	}
+	if metadata.GetLabels() == nil {
+		return allErrs
+	}
+
+	excludedZone := metadata.GetLabels()[az.ZoneEvacuationLabelKey]
+	zoneEvacuationExpiry := metadata.GetLabels()[az.ZoneEvacuationExpiryLabelKey]
+	currentZone, _ := os.LookupEnv(az.CurrentZoneEnvironmentKey)
+	// If both currentZone and excludedZone are empty, its an unexpected bug. The following check
+	// succeeds only when both strings are non empty and they match.
+	if excludedZone != "" && currentZone != "" && az.IsEpochCurrent(zoneEvacuationExpiry) && excludedZone == currentZone {
+		allErrs = append(allErrs, &field.Error{
+			Type:     field.ErrorTypeForbidden,
+			Field:    currentZone,
+			BadValue: excludedZone,
+			Detail:   fmt.Sprintf("zone %s is experiencing zonal outage. Cannot renew lease.", excludedZone),
+		})
 	}
 	return allErrs
 }

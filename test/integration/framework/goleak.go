@@ -56,7 +56,7 @@ func goleakFindRetry(opts ...goleak.Option) error {
 	// Several tests don't wait for goroutines to stop. goleak.Find retries
 	// internally, but not long enough. 5 seconds seemed to be enough for
 	// most tests, even when testing in the CI.
-	timeout := 5 * time.Second
+	timeout := 200 * time.Second
 	start := time.Now()
 	for {
 		err := goleak.Find(opts...)

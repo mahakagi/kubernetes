@@ -106,7 +106,7 @@ func testMultipleChecks(path, name string, t *testing.T) {
 		{"?exclude=dontexist", "ok", http.StatusOK, false},
 		{"?exclude=bad", "ok", http.StatusOK, true},
 		{"?verbose=true&exclude=bad", fmt.Sprintf("[+]ping ok\n[+]bad excluded: ok\n%s check passed\n", name), http.StatusOK, true},
-		{"?verbose=true&exclude=dontexist", fmt.Sprintf("[+]ping ok\nwarn: some health checks cannot be excluded: no matches for \"dontexist\"\n%s check passed\n", name), http.StatusOK, false},
+		{"?verbose=true&exclude=dontexist", fmt.Sprintf("[+]ping ok\n%s check passed\n", name), http.StatusOK, false},
 		{"/ping", "ok", http.StatusOK, false},
 		{"", "ok", http.StatusOK, false},
 		{"?verbose", fmt.Sprintf("[+]ping ok\n[-]bad failed: reason withheld\n%s check failed\n", name), http.StatusInternalServerError, true},

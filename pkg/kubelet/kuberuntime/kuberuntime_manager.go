@@ -179,6 +179,8 @@ type kubeGenericRuntimeManager struct {
 
 	// Root directory used to store pod logs
 	podLogsDirectory string
+	// fargate pod validation handler
+	fargatePodValidator lifecycle.PodValidator
 }
 
 // KubeGenericRuntime is a interface contains interfaces for container runtime and command.
@@ -223,6 +225,7 @@ func NewKubeGenericRuntimeManager(
 	memoryThrottlingFactor float64,
 	podPullingTimeRecorder images.ImagePodPullingTimeRecorder,
 	tracerProvider trace.TracerProvider,
+	fargatePodValidator lifecycle.PodValidator,
 ) (KubeGenericRuntime, error) {
 	ctx := context.Background()
 	runtimeService = newInstrumentedRuntimeService(runtimeService)
@@ -253,6 +256,7 @@ func NewKubeGenericRuntimeManager(
 		getNodeAllocatable:     getNodeAllocatable,
 		memoryThrottlingFactor: memoryThrottlingFactor,
 		podLogsDirectory:       podLogsDirectory,
+		fargatePodValidator:    fargatePodValidator,
 	}
 
 	typedVersion, err := kubeRuntimeManager.getTypedVersion(ctx)
@@ -1274,6 +1278,14 @@ func (m *kubeGenericRuntimeManager) SyncPod(ctx context.Context, pod *v1.Pod, po
 	start := func(ctx context.Context, typeName, metricLabel string, spec *startSpec) error {
 		startContainerResult := kubecontainer.NewSyncResult(kubecontainer.StartContainer, spec.container.Name)
 		result.AddSyncResult(startContainerResult)
+
+		if utilfeature.DefaultFeatureGate.Enabled(features.PodSecurityValidator) {
+			if admit, err := m.fargatePodValidator.ValidateContainer(spec.container); !admit {
+				startContainerResult.Fail(err, err.Error())
+				klog.V(4).InfoS(fmt.Sprintf("Failed to start container due to %s in pod", err.Error()), "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod))
+				return err
+			}
+		}
 
 		isInBackOff, msg, err := m.doBackOff(pod, spec.container, podStatus, backOff)
 		if isInBackOff {

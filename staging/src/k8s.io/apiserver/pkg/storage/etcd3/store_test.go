@@ -54,7 +54,10 @@ import (
 var scheme = runtime.NewScheme()
 var codecs = serializer.NewCodecFactory(scheme)
 
-const defaultTestPrefix = "test!"
+const (
+	defaultTestPrefix       = "test!"
+	defaultListEtcdMaxLimit = 500
+)
 
 func init() {
 	metav1.AddToGroupVersion(scheme, metav1.SchemeGroupVersion)
@@ -263,28 +266,36 @@ func checkStorageCallsInvariants(transformer *storagetesting.PrefixTransformer, 
 			t.Errorf("unexpected reads: %d, expected: %d", reads, estimatedProcessedObjects)
 		}
 		estimatedGetCalls := uint64(1)
-		if pageSize != 0 {
-			// We expect that kube-apiserver will be increasing page sizes
-			// if not full pages are received, so we should see significantly less
-			// than 1000 pages (which would be result of talking to etcd with page size
-			// copied from pred.Limit).
-			// The expected number of calls is n+1 where n is the smallest n so that:
-			// pageSize + pageSize * 2 + pageSize * 4 + ... + pageSize * 2^n >= podCount.
-			// For pageSize = 1, podCount = 1000, we get n+1 = 10, 2 ^ 10 = 1024.
-			currLimit := pageSize
-			for sum := uint64(1); sum < estimatedProcessedObjects; {
-				currLimit *= 2
-				if currLimit > maxLimit {
-					currLimit = maxLimit
-				}
-				sum += currLimit
-				estimatedGetCalls++
+		if pageSize <= 0 || pageSize > defaultListEtcdMaxLimit {
+			pageSize = defaultListEtcdMaxLimit
+		}
+		// We expect that kube-apiserver will be increasing page sizes
+		// if not full pages are received, so we should see significantly less
+		// than 1000 pages (which would be result of talking to etcd with page size
+		// copied from pred.Limit).
+		// The expected number of calls is n+1 where n is the smallest n so that:
+		// pageSize + pageSize * 2 + pageSize * 4 + ... + pageSize * 2^n >= podCount.
+		// For pageSize = 1, podCount = 1000, we get n+1 = 10, 2 ^ 10 = 1024.
+		currLimit := pageSize
+		for sum := pageSize; sum < estimatedProcessedObjects; {
+			currLimit *= 2
+			if currLimit > defaultListEtcdMaxLimit {
+				currLimit = defaultListEtcdMaxLimit
 			}
+			sum += currLimit
+			estimatedGetCalls++
 		}
 		if reads := recorder.GetReadsAndReset(); reads != estimatedGetCalls {
 			t.Fatalf("unexpected reads: %d, want: %d", reads, estimatedGetCalls)
 		}
 	}
+}
+
+func TestListPaginationWithEnforcedLimit(t *testing.T) {
+	ctx, store, etcdClient := testSetup(t, withRecorder())
+	validation := checkStorageCallsInvariants(
+		store.transformer.(*storagetesting.PrefixTransformer), etcdClient.KV.(*clientRecorder))
+	storagetesting.RunTestListPaginationWithEnforcedLimit(ctx, t, store, validation)
 }
 
 func TestListContinuation(t *testing.T) {
@@ -536,15 +547,17 @@ func (r *clientRecorder) GetReadsAndReset() uint64 {
 }
 
 type setupOptions struct {
-	client         func(testing.TB) *kubernetes.Client
-	codec          runtime.Codec
-	newFunc        func() runtime.Object
-	newListFunc    func() runtime.Object
-	prefix         string
-	resourcePrefix string
-	groupResource  schema.GroupResource
-	transformer    value.Transformer
-	leaseConfig    LeaseManagerConfig
+	client          func(testing.TB) *kubernetes.Client
+	codec           runtime.Codec
+	newFunc         func() runtime.Object
+	newListFunc     func() runtime.Object
+	prefix          string
+	resourcePrefix  string
+	groupResource   schema.GroupResource
+	transformer     value.Transformer
+	pagingConfig    PagingConfig
+	leaseConfig     LeaseManagerConfig
+	enableFastCount bool
 
 	recorderEnabled bool
 }
@@ -588,7 +601,9 @@ func withDefaults(options *setupOptions) {
 	options.resourcePrefix = "/pods"
 	options.groupResource = schema.GroupResource{Resource: "pods"}
 	options.transformer = newTestTransformer()
+	options.pagingConfig = PagingConfig{MaximumPageSize: defaultListEtcdMaxLimit}
 	options.leaseConfig = newTestLeaseManagerConfig()
+	options.enableFastCount = true
 }
 
 var _ setupOption = withDefaults
@@ -613,9 +628,11 @@ func testSetup(t testing.TB, opts ...setupOption) (context.Context, *store, *kub
 		setupOpts.resourcePrefix,
 		setupOpts.groupResource,
 		setupOpts.transformer,
+		setupOpts.pagingConfig,
 		setupOpts.leaseConfig,
 		NewDefaultDecoder(setupOpts.codec, versioner),
 		versioner,
+		setupOpts.enableFastCount,
 	)
 	ctx := context.Background()
 	return ctx, store, client

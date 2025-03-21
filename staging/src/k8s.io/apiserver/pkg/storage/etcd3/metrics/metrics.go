@@ -153,6 +153,16 @@ var (
 		},
 		[]string{"resource"},
 	)
+
+	listStorageLatency = compbasemetrics.NewHistogramVec(
+		&compbasemetrics.HistogramOpts{
+			Name:           "apiserver_storage_list_duration_seconds",
+			Help:           "Duration of objects returned for a LIST request from storage",
+			Buckets:        []float64{0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 15.0, 30.0, 60.0},
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"resource"},
+	)
 )
 
 var registerMetrics sync.Once
@@ -175,6 +185,7 @@ func Register() {
 		legacyregistry.MustRegister(listStorageNumSelectorEvals)
 		legacyregistry.MustRegister(listStorageNumReturned)
 		legacyregistry.MustRegister(decodeErrorCounts)
+		legacyregistry.MustRegister(listStorageLatency)
 	})
 }
 
@@ -197,6 +208,11 @@ func RecordEtcdRequest(verb, resource string, err error, startTime time.Time) {
 // RecordEtcdEvent updated the etcd_events_received_total metric.
 func RecordEtcdEvent(resource string) {
 	etcdEventsReceivedCounts.WithLabelValues(resource).Inc()
+}
+
+// RecordListStorageLatency sets the "apiserver_storage_list_duration_seconds" metrics.
+func RecordListStorageLatency(resource string, startTime time.Time) {
+	listStorageLatency.WithLabelValues(resource).Observe(sinceInSeconds(startTime))
 }
 
 // RecordEtcdBookmark updates the etcd_bookmark_counts metric.

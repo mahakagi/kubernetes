@@ -179,6 +179,9 @@ func (s *EtcdOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&s.StorageConfig.Transport.ServerList, "etcd-servers", s.StorageConfig.Transport.ServerList,
 		"List of etcd servers to connect with (scheme://ip:port), comma separated.")
 
+	fs.DurationVar(&s.StorageConfig.Transport.AutoSyncInterval, "etcd-auto-sync-interval", s.StorageConfig.Transport.AutoSyncInterval,
+		"The interval at which to update etcd endpoints to the latest members as reported by the cluster. Disabled when set to 0. Disabled by default.")
+
 	fs.StringVar(&s.StorageConfig.Prefix, "etcd-prefix", s.StorageConfig.Prefix,
 		"The prefix to prepend to all resource paths in etcd.")
 
@@ -190,6 +193,9 @@ func (s *EtcdOptions) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringVar(&s.StorageConfig.Transport.TrustedCAFile, "etcd-cafile", s.StorageConfig.Transport.TrustedCAFile,
 		"SSL Certificate Authority file used to secure etcd communication.")
+
+	fs.BoolVar(&s.StorageConfig.Transport.InsecureSkipVerify, "etcd-insecure-skip-verify", s.StorageConfig.Transport.InsecureSkipVerify,
+		"Insecure skip verify certificate of etcd server. Enabled by default.")
 
 	fs.StringVar(&s.EncryptionProviderConfigFilepath, "encryption-provider-config", s.EncryptionProviderConfigFilepath,
 		"The file containing configuration for encryption providers to be used for storing secrets in etcd")
@@ -210,11 +216,20 @@ func (s *EtcdOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&s.StorageConfig.HealthcheckTimeout, "etcd-healthcheck-timeout", s.StorageConfig.HealthcheckTimeout,
 		"The timeout to use when checking etcd health.")
 
+	fs.Int64Var(&s.StorageConfig.MaximumPageSize, "maximum-page-size-for-etcd-lists", s.StorageConfig.MaximumPageSize,
+		"Maximum etcd page size for etcd lists. If zero, the limit is unbounded")
+
 	fs.DurationVar(&s.StorageConfig.ReadycheckTimeout, "etcd-readycheck-timeout", s.StorageConfig.ReadycheckTimeout,
 		"The timeout to use when checking etcd readiness")
 
+	fs.BoolVar(&s.StorageConfig.Transport.EnableGrpcHealthcheck, "etcd-enable-grpc-healthcheck", s.StorageConfig.Transport.EnableGrpcHealthcheck,
+		"Enable grpc healthcheck for etcd client. See https://grpc.io/docs/guides/health-checking/#enabling-client-health-checking")
+
 	fs.Int64Var(&s.StorageConfig.LeaseManagerConfig.ReuseDurationSeconds, "lease-reuse-duration-seconds", s.StorageConfig.LeaseManagerConfig.ReuseDurationSeconds,
 		"The time in seconds that each lease is reused. A lower value could avoid large number of objects reusing the same lease. Notice that a too small value may cause performance problems at storage layer.")
+
+	fs.BoolVar(&s.StorageConfig.EnableFastCount, "enable-fast-count", s.StorageConfig.EnableFastCount,
+		"Enable fast counting for RangeRequests to improve the efficiency of paginated list operations in Kubernetes API Server and etcd.")
 }
 
 // ApplyTo mutates the provided server.Config.  It must never mutate the receiver (EtcdOptions).

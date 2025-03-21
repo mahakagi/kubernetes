@@ -40,6 +40,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/token/tokenfile"
 	tokenunion "k8s.io/apiserver/pkg/authentication/token/union"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	webhookutil "k8s.io/apiserver/pkg/util/webhook"
 	"k8s.io/apiserver/plugin/pkg/authenticator/token/oidc"
 	"k8s.io/apiserver/plugin/pkg/authenticator/token/webhook"
@@ -49,6 +50,7 @@ import (
 
 	// Initialize all known client auth plugins.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 )
 
@@ -66,6 +68,7 @@ type Config struct {
 	OIDCSigningAlgs             []string
 	ServiceAccountLookup        bool
 	ServiceAccountIssuers       []string
+	KeyServiceURL               string
 	APIAudiences                authenticator.Audiences
 	WebhookTokenAuthnConfigFile string
 	WebhookTokenAuthnVersion    string
@@ -139,7 +142,7 @@ func (config Config) New(serverLifecycle context.Context) (authenticator.Request
 		tokenAuthenticators = append(tokenAuthenticators, serviceAccountAuth)
 	}
 	if len(config.ServiceAccountIssuers) > 0 && config.ServiceAccountPublicKeysGetter != nil {
-		serviceAccountAuth, err := newServiceAccountAuthenticator(config.ServiceAccountIssuers, config.ServiceAccountPublicKeysGetter, config.APIAudiences, config.ServiceAccountTokenGetter)
+		serviceAccountAuth, err := newServiceAccountAuthenticator(config.KeyServiceURL, config.ServiceAccountIssuers, config.ServiceAccountPublicKeysGetter, config.APIAudiences, config.ServiceAccountTokenGetter)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -350,12 +353,15 @@ func newLegacyServiceAccountAuthenticator(publicKeysGetter serviceaccount.Public
 }
 
 // newServiceAccountAuthenticator returns an authenticator.Token or an error
-func newServiceAccountAuthenticator(issuers []string, publicKeysGetter serviceaccount.PublicKeysGetter, apiAudiences authenticator.Audiences, serviceAccountGetter serviceaccount.ServiceAccountTokenGetter) (authenticator.Token, error) {
+func newServiceAccountAuthenticator(keyServerURL string, issuers []string, publicKeysGetter serviceaccount.PublicKeysGetter, apiAudiences authenticator.Audiences, serviceAccountGetter serviceaccount.ServiceAccountTokenGetter) (authenticator.Token, error) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.ExternalKeyService) && keyServerURL != "" {
+		return serviceaccount.ExternalJWTTokenAuthenticator(keyServerURL, issuers, apiAudiences, serviceaccount.NewValidator(serviceAccountGetter))
+	}
+
 	if publicKeysGetter == nil {
 		return nil, fmt.Errorf("no public key getter provided")
 	}
-	tokenAuthenticator := serviceaccount.JWTTokenAuthenticator(issuers, publicKeysGetter, apiAudiences, serviceaccount.NewValidator(serviceAccountGetter))
-	return tokenAuthenticator, nil
+	return serviceaccount.JWTTokenAuthenticator(issuers, publicKeysGetter, apiAudiences, serviceaccount.NewValidator(serviceAccountGetter)), nil
 }
 
 func newWebhookTokenAuthenticator(config Config) (authenticator.Token, error) {

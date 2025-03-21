@@ -411,6 +411,7 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 	nodeLabels map[string]string,
 	nodeStatusMaxImages int32,
 	seccompDefault bool,
+	waitForAddresses bool,
 ) (*Kubelet, error) {
 	ctx := context.Background()
 	logger := klog.TODO()
@@ -609,6 +610,7 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 		containerManager:               kubeDeps.ContainerManager,
 		nodeIPs:                        nodeIPs,
 		nodeIPValidator:                validateNodeIP,
+		waitForAddresses:               waitForAddresses,
 		clock:                          clock.RealClock{},
 		enableControllerAttachDetach:   kubeCfg.EnableControllerAttachDetach,
 		makeIPTablesUtilChains:         kubeCfg.MakeIPTablesUtilChains,
@@ -747,6 +749,7 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 		*kubeCfg.MemoryThrottlingFactor,
 		kubeDeps.PodStartupLatencyTracker,
 		kubeDeps.TracerProvider,
+		lifecycle.NewPodSpecValidator(klet.kubeClient),
 	)
 	if err != nil {
 		return nil, err
@@ -979,6 +982,9 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 		// AppArmor is a Linux kernel security module and it does not support other operating systems.
 		klet.appArmorValidator = apparmor.NewValidator()
 		klet.admitHandlers.AddPodAdmitHandler(lifecycle.NewAppArmorAdmitHandler(klet.appArmorValidator))
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodSecurityValidator) {
+		klet.admitHandlers.AddPodAdmitHandler(lifecycle.NewFargatePodAdmitHandler(klet.kubeClient))
 	}
 
 	leaseDuration := time.Duration(kubeCfg.NodeLeaseDurationSeconds) * time.Second
@@ -1355,6 +1361,9 @@ type Kubelet struct {
 
 	// use this function to validate the kubelet nodeIP
 	nodeIPValidator func(net.IP) error
+
+	// If true, wait for control plane to provide addresses before marking node ready
+	waitForAddresses bool
 
 	// If non-nil, this is a unique identifier for the node in an external database, eg. cloudprovider
 	providerID string

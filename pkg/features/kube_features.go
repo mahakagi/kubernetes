@@ -264,6 +264,12 @@ const (
 	// Lock to default and remove after v1.22 based on user feedback that should be reflected in KEP #1972 update
 	ExecProbeTimeout featuregate.Feature = "ExecProbeTimeout"
 
+	// owner: @micahhausler
+	// alpha: v1.16
+	//
+	// External signing of projected service account tokens
+	ExternalKeyService featuregate.Feature = "ExternalKeyService"
+
 	// owner: @bobbypage
 	// Adds support for kubelet to detect node shutdown and gracefully terminate pods prior to the node being shutdown.
 	GracefulNodeShutdown featuregate.Feature = "GracefulNodeShutdown"
@@ -534,6 +540,11 @@ const (
 	//
 	// Enables PortForward to be proxied with a websocket client
 	PortForwardWebsockets featuregate.Feature = "PortForwardWebsockets"
+	// owner: @saranbalaji90
+	// alpha: TBD
+	//
+	// Enables kubelet to validate and restrict pods based on security contexts.
+	PodSecurityValidator featuregate.Feature = "PodSecurityValidator"
 
 	// owner: @jessfraz
 	//

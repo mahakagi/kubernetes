@@ -36,8 +36,10 @@ import (
 	v1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/keyutil"
+	"k8s.io/kubernetes/pkg/apis/core"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
 	"k8s.io/kubernetes/pkg/serviceaccount"
+	externalsigner "k8s.io/kubernetes/pkg/serviceaccount/externalsigner/v1alpha1"
 )
 
 const otherPublicKey = `-----BEGIN PUBLIC KEY-----
@@ -136,11 +138,19 @@ func getPublicKey(data string) interface{} {
 }
 
 func TestTokenGenerateAndValidate(t *testing.T) {
+	newIssuer := []string{serviceaccount.LegacyIssuer, "bar"}
 	expectedUserName := "system:serviceaccount:test:my-service-account"
 	expectedUserUID := "12345"
 
 	// Related API objects
 	serviceAccount := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-service-account",
+			UID:       "12345",
+			Namespace: "test",
+		},
+	}
+	coreSa := core.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-service-account",
 			UID:       "12345",
@@ -213,6 +223,22 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 	checkJSONWebSignatureHasKeyID(t, ecdsaToken, ecdsaKeyID)
 
 	ecdsaTokenMalformedIss := generateECDSATokenWithMalformedIss(t, serviceAccount, ecdsaSecret)
+	// Generate the remote RSA token
+	remoteRsaGenerator := serviceaccount.ExternalTokenGenerator{
+		Iss:    newIssuer[0],
+		Client: newMockKeyServiceClient(getPrivateKey(rsaPrivateKey)),
+	}
+	sc, pc, err := serviceaccount.Claims(coreSa, nil, nil, nil, 60*60*24, 0, []string{"kubernetes"})
+	if err != nil {
+		t.Fatalf("error generating claim: %v", err)
+	}
+	remoteRsaToken, err := remoteRsaGenerator.GenerateToken(context.TODO(), sc, pc)
+	if err != nil {
+		t.Fatalf("error generating token: %v", err)
+	}
+	if len(remoteRsaToken) == 0 {
+		t.Fatalf("no token generated")
+	}
 
 	// Generate signer with same keys as RSA signer but different unrecognized issuer
 	badIssuerGenerator, err := serviceaccount.JWTTokenGenerator("foo", getPrivateKey(rsaPrivateKey))
@@ -241,11 +267,15 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 		Keys   []interface{}
 		Token  string
 
-		ExpectedErr      bool
-		ExpectedOK       bool
-		ExpectedUserName string
-		ExpectedUserUID  string
-		ExpectedGroups   []string
+		ExpectedErr                 bool
+		ExpectedOK                  bool
+		ExpectedUserName            string
+		ExpectedUserUID             string
+		ExpectedGroups              []string
+		Authenticator               authenticator.Token
+		ExternalServiceClient       externalsigner.KeyServiceClient
+		ExpectedListPublicKeysCalls int
+		Issuer                      []string
 	}{
 		"no keys": {
 			Token:       rsaToken,
@@ -362,85 +392,132 @@ func TestTokenGenerateAndValidate(t *testing.T) {
 			ExpectedErr: false,
 			ExpectedOK:  false,
 		},
+		"valid (external rsa)": {
+			Token:                       remoteRsaToken,
+			Client:                      fake.NewSimpleClientset(serviceAccount),
+			Keys:                        nil,
+			ExpectedErr:                 false,
+			ExpectedOK:                  true,
+			ExpectedUserName:            expectedUserName,
+			ExpectedUserUID:             expectedUserUID,
+			ExpectedGroups:              []string{"system:serviceaccounts", "system:serviceaccounts:test"},
+			ExternalServiceClient:       newMockKeyServiceClient(getPrivateKey(rsaPrivateKey)),
+			ExpectedListPublicKeysCalls: 1,
+			Issuer:                      newIssuer,
+		},
+		"invalid key (external rsa)": {
+			Token:                       remoteRsaToken,
+			Client:                      nil,
+			Keys:                        nil,
+			ExpectedErr:                 true,
+			ExpectedOK:                  false,
+			ExternalServiceClient:       newMockKeyServiceClient(getPrivateKey(ecdsaPrivateKey)),
+			ExpectedListPublicKeysCalls: 1,
+			Issuer:                      newIssuer,
+		},
+		"valid key, invalid issuer (external rsa)": {
+			Token:                       badIssuerToken,
+			Client:                      nil,
+			Keys:                        []interface{}{getPublicKey(rsaPublicKey)},
+			ExpectedErr:                 false,
+			ExpectedOK:                  false,
+			ExternalServiceClient:       newMockKeyServiceClient(getPrivateKey(rsaPrivateKey)),
+			ExpectedListPublicKeysCalls: 0,
+			Issuer:                      newIssuer,
+		},
 	}
 
 	for k, tc := range testCases {
-		auds := authenticator.Audiences{"api"}
-		getter := serviceaccountcontroller.NewGetterFromClient(
-			tc.Client,
-			v1listers.NewSecretLister(newIndexer(func(namespace, name string) (interface{}, error) {
-				return tc.Client.CoreV1().Secrets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-			})),
-			v1listers.NewServiceAccountLister(newIndexer(func(namespace, name string) (interface{}, error) {
-				return tc.Client.CoreV1().ServiceAccounts(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-			})),
-			v1listers.NewPodLister(newIndexer(func(namespace, name string) (interface{}, error) {
-				return tc.Client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-			})),
-			v1listers.NewNodeLister(newIndexer(func(_, name string) (interface{}, error) {
-				return tc.Client.CoreV1().Nodes().Get(context.TODO(), name, metav1.GetOptions{})
-			})),
-		)
-		var secretsWriter typedv1core.SecretsGetter
-		if tc.Client != nil {
-			secretsWriter = tc.Client.CoreV1()
-		}
-		validator, err := serviceaccount.NewLegacyValidator(tc.Client != nil, getter, secretsWriter)
-		if err != nil {
-			t.Fatalf("While creating legacy validator, err: %v", err)
-		}
-		staticKeysGetter, err := serviceaccount.StaticPublicKeysGetter(tc.Keys)
-		if err != nil {
-			t.Fatal(err)
-		}
-		keysGetter := &keyIDPrefixer{PublicKeysGetter: staticKeysGetter}
+		t.Run(fmt.Sprintf("case %s", k), func(t *testing.T) {
+			auds := authenticator.Audiences{"api"}
+			getter := serviceaccountcontroller.NewGetterFromClient(
+				tc.Client,
+				v1listers.NewSecretLister(newIndexer(func(namespace, name string) (interface{}, error) {
+					return tc.Client.CoreV1().Secrets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+				})),
+				v1listers.NewServiceAccountLister(newIndexer(func(namespace, name string) (interface{}, error) {
+					return tc.Client.CoreV1().ServiceAccounts(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+				})),
+				v1listers.NewPodLister(newIndexer(func(namespace, name string) (interface{}, error) {
+					return tc.Client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+				})),
+				v1listers.NewNodeLister(newIndexer(func(_, name string) (interface{}, error) {
+					return tc.Client.CoreV1().Nodes().Get(context.TODO(), name, metav1.GetOptions{})
+				})),
+			)
+			var authn authenticator.Token
+			var keysGetter *keyIDPrefixer
+			if tc.ExternalServiceClient != nil {
+				authn = externalTokenAuthenticator(tc.ExternalServiceClient, tc.Issuer, nil, serviceaccount.NewValidator(getter))
+			} else {
+				var secretsWriter typedv1core.SecretsGetter
+				if tc.Client != nil {
+					secretsWriter = tc.Client.CoreV1()
+				}
+				validator, err := serviceaccount.NewLegacyValidator(tc.Client != nil, getter, secretsWriter)
+				if err != nil {
+					t.Fatalf("While creating legacy validator, err: %v", err)
+				}
+				staticKeysGetter, err := serviceaccount.StaticPublicKeysGetter(tc.Keys)
+				if err != nil {
+					t.Fatal(err)
+				}
+				keysGetter = &keyIDPrefixer{PublicKeysGetter: staticKeysGetter}
 
-		authn := serviceaccount.JWTTokenAuthenticator([]string{serviceaccount.LegacyIssuer, "bar"}, keysGetter, auds, validator)
-
-		// An invalid, non-JWT token should always fail
-		ctx := authenticator.WithAudiences(context.TODO(), auds)
-		if _, ok, err := authn.AuthenticateToken(ctx, "invalid token"); err != nil || ok {
-			t.Errorf("%s: Expected err=nil, ok=false for non-JWT token", k)
-			continue
-		}
-
-		if tc.ExpectedOK {
-			// if authentication is otherwise expected to succeed, demonstrate changing key ids makes it fail
-			keysGetter.keyIDPrefix = "bogus"
-			if _, ok, err := authn.AuthenticateToken(ctx, tc.Token); err == nil || !strings.Contains(err.Error(), "no keys found") || ok {
-				t.Errorf("%s: Expected err containing 'no keys found', ok=false when key lookup by ID fails", k)
-				continue
+				authn = serviceaccount.JWTTokenAuthenticator([]string{serviceaccount.LegacyIssuer, "bar"}, keysGetter, auds, validator)
 			}
-			keysGetter.keyIDPrefix = ""
-		}
+			// An invalid, non-JWT token should always fail
+			ctx := authenticator.WithAudiences(context.TODO(), auds)
+			if _, ok, err := authn.AuthenticateToken(ctx, "invalid token"); err != nil || ok {
+				t.Errorf("%s: Expected err=nil, ok=false for non-JWT token", k)
+				return
+			}
 
-		resp, ok, err := authn.AuthenticateToken(ctx, tc.Token)
-		if (err != nil) != tc.ExpectedErr {
-			t.Errorf("%s: Expected error=%v, got %v", k, tc.ExpectedErr, err)
-			continue
-		}
+			if tc.ExternalServiceClient == nil && tc.ExpectedOK {
+				// if authentication is otherwise expected to succeed, demonstrate changing key ids makes it fail
+				keysGetter.keyIDPrefix = "bogus"
+				if _, ok, err := authn.AuthenticateToken(ctx, tc.Token); err == nil || !strings.Contains(err.Error(), "no keys found") || ok {
+					t.Errorf("%s: Expected err containing 'no keys found', ok=false when key lookup by ID fails", k)
+					return
+				}
+				keysGetter.keyIDPrefix = ""
+			}
 
-		if ok != tc.ExpectedOK {
-			t.Errorf("%s: Expected ok=%v, got %v", k, tc.ExpectedOK, ok)
-			continue
-		}
+			resp, ok, err := authn.AuthenticateToken(ctx, tc.Token)
+			if (err != nil) != tc.ExpectedErr {
+				t.Errorf("%s: Expected error=%v, got %v", k, tc.ExpectedErr, err)
+				return
+			}
 
-		if err != nil || !ok {
-			continue
-		}
+			if ok != tc.ExpectedOK {
+				t.Errorf("%s: Expected ok=%v, got %v", k, tc.ExpectedOK, ok)
+				return
+			}
 
-		if resp.User.GetName() != tc.ExpectedUserName {
-			t.Errorf("%s: Expected username=%v, got %v", k, tc.ExpectedUserName, resp.User.GetName())
-			continue
-		}
-		if resp.User.GetUID() != tc.ExpectedUserUID {
-			t.Errorf("%s: Expected userUID=%v, got %v", k, tc.ExpectedUserUID, resp.User.GetUID())
-			continue
-		}
-		if !reflect.DeepEqual(resp.User.GetGroups(), tc.ExpectedGroups) {
-			t.Errorf("%s: Expected groups=%v, got %v", k, tc.ExpectedGroups, resp.User.GetGroups())
-			continue
-		}
+			if tc.ExternalServiceClient != nil {
+				listPublicKeysCalls := tc.ExternalServiceClient.(*mockKeyServiceClient).listPublicKeysCalls
+				if listPublicKeysCalls != tc.ExpectedListPublicKeysCalls {
+					t.Errorf("%s: Expected listPublicKeysCalls=%v, got %v", k, tc.ExpectedListPublicKeysCalls, listPublicKeysCalls)
+				}
+			}
+
+			if err != nil || !ok {
+				return
+			}
+
+			if resp.User.GetName() != tc.ExpectedUserName {
+				t.Errorf("%s: Expected username=%v, got %v", k, tc.ExpectedUserName, resp.User.GetName())
+				return
+			}
+			if resp.User.GetUID() != tc.ExpectedUserUID {
+				t.Errorf("%s: Expected userUID=%v, got %v", k, tc.ExpectedUserUID, resp.User.GetUID())
+				return
+			}
+			if !reflect.DeepEqual(resp.User.GetGroups(), tc.ExpectedGroups) {
+				t.Errorf("%s: Expected groups=%v, got %v", k, tc.ExpectedGroups, resp.User.GetGroups())
+				return
+			}
+		})
 	}
 }
 
@@ -614,5 +691,20 @@ func TestStaticPublicKeysGetter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func externalTokenAuthenticator[PrivateClaims any](client externalsigner.KeyServiceClient, issuers []string,
+	implicitAuds authenticator.Audiences, validator serviceaccount.Validator[PrivateClaims]) authenticator.Token {
+	issuersMap := make(map[string]bool)
+	for _, issuer := range issuers {
+		issuersMap[issuer] = true
+	}
+	return &serviceaccount.ExternalTokenAuthenticator[PrivateClaims]{
+		Client:       client,
+		Issuers:      issuers,
+		IssuersMap:   issuersMap,
+		Validator:    validator,
+		ImplicitAuds: implicitAuds,
 	}
 }

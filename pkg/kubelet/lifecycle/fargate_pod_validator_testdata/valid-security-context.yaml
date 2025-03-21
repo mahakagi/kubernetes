@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "true"
+  name: valid-security-context
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  containers:
+    - image: nginx:alpine
+      name: nginx
+      securityContext:
+        capabilities:
+          # All ambient capabilities
+          add:
+          - "AUDIT_WRITE"
+          - "CHOWN"
+          - "DAC_OVERRIDE"
+          - "FOWNER"
+          - "FSETID"
+          - "KILL"
+          - "MKNOD"
+          - "NET_BIND_SERVICE"
+          - "NET_RAW"
+          - "SETFCAP"
+          - "SETGID"
+          - "SETPCAP"
+          - "SETUID"
+          - "SYS_CHROOT"

@@ -57,6 +57,7 @@ func TestEndpointUpdates(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Endpoints(),
+		informers.Core().V1().Nodes(),
 		client,
 		0)
 
@@ -181,6 +182,7 @@ func TestEndpointWithMultiplePodUpdates(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Endpoints(),
+		informers.Core().V1().Nodes(),
 		client,
 		0)
 
@@ -324,6 +326,7 @@ func TestExternalNameToClusterIPTransition(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Endpoints(),
+		informers.Core().V1().Nodes(),
 		client,
 		0)
 
@@ -433,6 +436,7 @@ func TestEndpointWithTerminatingPod(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Endpoints(),
+		informers.Core().V1().Nodes(),
 		client,
 		0)
 
@@ -626,6 +630,7 @@ func TestEndpointTruncate(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Endpoints(),
+		informers.Core().V1().Nodes(),
 		client,
 		0)
 

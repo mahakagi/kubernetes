@@ -717,6 +717,64 @@ func TestSyncPodWithConvertedPodSysctls(t *testing.T) {
 	}
 }
 
+func TestSyncPodWhenContainerValidationFails(t *testing.T) {
+	ctx := context.Background()
+	_, _, m, err := createTestRuntimeManager()
+	assert.NoError(t, err)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodSecurityValidator, true)
+
+	volumeDevices := v1.VolumeDevice{
+		Name:       "volumeDevice",
+		DevicePath: "test/path",
+	}
+	containers := []v1.Container{
+		{
+			Name:  "container1",
+			Image: "busybox",
+			SecurityContext: &v1.SecurityContext{
+				Capabilities: &v1.Capabilities{
+					Add: []v1.Capability{"NET_ADMIN"},
+				},
+			},
+		},
+		{
+			Name:          "container2",
+			Image:         "busybox",
+			VolumeDevices: []v1.VolumeDevice{volumeDevices},
+		},
+	}
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:       "12345678",
+			Name:      "foo",
+			Namespace: "new",
+		},
+		Spec: v1.PodSpec{
+			Containers: containers,
+		},
+	}
+
+	podStatus, err := m.GetPodStatus(ctx, pod.UID, pod.Name, pod.Namespace)
+	backOff := flowcontrol.NewBackOff(time.Second, time.Minute)
+	result := m.SyncPod(context.Background(), pod, podStatus, []v1.Secret{}, backOff)
+	expectErrMsgCtr1 := "invalid SecurityContext fields: Capabilities added: NET_ADMIN"
+	expectErrMsgCtr2 := "volumeDevices not supported"
+
+	assert.ErrorContainsf(t, result.Error(), "failed to \"StartContainer\" for \"container1\"", expectErrMsgCtr1)
+	assert.ErrorContainsf(t, result.Error(), "failed to \"StartContainer\" for \"container2\"", expectErrMsgCtr2)
+
+	// return error when unallowlisted advanced linux caps are added to containers
+	admit, err := m.fargatePodValidator.ValidateContainer(&containers[0])
+	assert.False(t, admit)
+	assert.EqualError(t, err, expectErrMsgCtr1)
+
+	// return error when unallowlisted advanced linux caps are added to containers
+	admit, err = m.fargatePodValidator.ValidateContainer(&containers[1])
+	assert.False(t, admit)
+	assert.EqualError(t, err, expectErrMsgCtr2)
+}
+
 func TestPruneInitContainers(t *testing.T) {
 	ctx := context.Background()
 	fakeRuntime, _, m, err := createTestRuntimeManager()

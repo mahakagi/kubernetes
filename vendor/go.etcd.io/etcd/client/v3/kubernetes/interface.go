@@ -74,6 +74,11 @@ type ListOptions struct {
 	// 0 means no limitation.
 	Limit int64
 
+	// EnableFastCount informs ETCD server to not perform a count of all objects during
+	// paginated list object calls which speeds up the list operation. For more info please see:
+	// https://quip-amazon.com/CjrMAniPg7Zn/etcdAPIServer-LIST-Optimization-Migration-Plan
+	EnableFastCount bool
+
 	// Continue is a key from which to resume the List operation, excluding the given key.
 	// It should be set to the last key from a previous ListResponse when paginating.
 	Continue string

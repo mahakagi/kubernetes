@@ -17,11 +17,15 @@ limitations under the License.
 package validation
 
 import (
+	"fmt"
+	"os"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/coordination"
+	az "k8s.io/kubernetes/pkg/kubeapiserver/az"
 	"k8s.io/utils/ptr"
 )
 
@@ -352,5 +356,192 @@ func TestValidateCoordinatedLeaseStrategy(t *testing.T) {
 		} else if !tc.err && len(errs) != 0 {
 			t.Errorf("Expected no err, got err %v", errs)
 		}
+	}
+}
+
+func TestLeaseValidationForLeaseStealing(t *testing.T) {
+	holder := "holder"
+	leaseDurationSeconds := int32(10)
+	tests := []struct {
+		name               string
+		currentZone        string
+		impactedZone       string
+		componentName      string
+		namespaceName      string
+		errorCountExpected int
+		setEnvironment     bool
+		setLabel           bool
+	}{
+		{
+			name:               "FailureIfExcludedZoneIsCurrentZone",
+			currentZone:        "az1",
+			impactedZone:       "az1",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 1,
+			setEnvironment:     true,
+			setLabel:           true,
+		},
+		{
+			name:               "SuccessIfExcludedZoneIsNotCurrentZone",
+			currentZone:        "az1",
+			impactedZone:       "az2",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 0,
+			setEnvironment:     true,
+			setLabel:           true,
+		},
+		{
+			name:               "SuccessIfComponentIsNotEKSManagedComponent",
+			currentZone:        "az1",
+			impactedZone:       "az1",
+			componentName:      "some-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 0,
+			setEnvironment:     true,
+			setLabel:           true,
+		},
+		{
+			name:               "SuccessIfZoneEnvironmentIsUnset",
+			impactedZone:       "az1",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 0,
+			setEnvironment:     false,
+			setLabel:           true,
+		},
+		{
+			name:               "SuccessIfZoneEnvironmentIsSetButLabelIsNotSet",
+			currentZone:        "az1",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 0,
+			setEnvironment:     true,
+			setLabel:           false,
+		},
+		{
+			name:               "FailIfNamespaceIsNotKubeSystem",
+			currentZone:        "az1",
+			impactedZone:       "az1",
+			componentName:      "kube-scheduler",
+			namespaceName:      "some-system",
+			errorCountExpected: 0,
+			setEnvironment:     true,
+			setLabel:           true,
+		},
+		{
+			name:               "SuccessIfBothLabelAndZoneAreUnset",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 0,
+			setEnvironment:     true,
+			setLabel:           true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defer os.Unsetenv(az.CurrentZoneEnvironmentKey)
+			if test.setEnvironment {
+				os.Setenv(az.CurrentZoneEnvironmentKey, test.currentZone)
+			}
+
+			lease := &coordination.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            test.componentName,
+					Namespace:       test.namespaceName,
+					ResourceVersion: "1",
+				},
+				Spec: coordination.LeaseSpec{
+					HolderIdentity:       &holder,
+					LeaseDurationSeconds: &leaseDurationSeconds,
+				},
+			}
+
+			if test.setLabel {
+				lease.SetLabels(map[string]string{
+					az.ZoneEvacuationLabelKey:       test.impactedZone,
+					az.ZoneEvacuationExpiryLabelKey: fmt.Sprintf("%d", time.Now().UTC().Unix()+3600),
+				})
+			}
+
+			errs := ValidateLease(lease)
+			if len(errs) != test.errorCountExpected {
+				t.Errorf("unexpected list of errors for lease create: %v", errs)
+			}
+
+			errs = ValidateLeaseUpdate(lease, lease)
+			if len(errs) != test.errorCountExpected {
+				t.Errorf("unexpected list of errors for lease update: %v", errs)
+			}
+		})
+	}
+}
+
+func TestLeaseValidationForLeaseStealingWhenLabelIsExpired(t *testing.T) {
+	holder := "holder"
+	leaseDurationSeconds := int32(10)
+	tests := []struct {
+		name               string
+		currentZone        string
+		impactedZone       string
+		componentName      string
+		namespaceName      string
+		errorCountExpected int
+		expiryTime         int64
+	}{
+		{
+			name:               "FailureIfExcludedZoneIsCurrentZoneAndTtlIsNotExpired",
+			currentZone:        "az1",
+			impactedZone:       "az1",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 1,
+			expiryTime:         time.Now().UTC().Unix() + 3600,
+		},
+		{
+			name:               "FailureIfExcludedZoneIsCurrentZoneAndTtlIsExpired",
+			currentZone:        "az1",
+			impactedZone:       "az1",
+			componentName:      "kube-scheduler",
+			namespaceName:      "kube-system",
+			errorCountExpected: 0,
+			expiryTime:         time.Now().UTC().Unix() - 3600,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defer os.Unsetenv(az.CurrentZoneEnvironmentKey)
+			os.Setenv(az.CurrentZoneEnvironmentKey, test.currentZone)
+
+			lease := &coordination.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            test.componentName,
+					Namespace:       test.namespaceName,
+					ResourceVersion: "1",
+				},
+				Spec: coordination.LeaseSpec{
+					HolderIdentity:       &holder,
+					LeaseDurationSeconds: &leaseDurationSeconds,
+				},
+			}
+
+			lease.SetLabels(map[string]string{
+				az.ZoneEvacuationLabelKey:       test.impactedZone,
+				az.ZoneEvacuationExpiryLabelKey: fmt.Sprintf("%d", test.expiryTime),
+			})
+
+			errs := ValidateLease(lease)
+			if len(errs) != test.errorCountExpected {
+				t.Errorf("unexpected list of errors for lease create: %v", errs)
+			}
+
+			errs = ValidateLeaseUpdate(lease, lease)
+			if len(errs) != test.errorCountExpected {
+				t.Errorf("unexpected list of errors for lease update: %v", errs)
+			}
+		})
 	}
 }

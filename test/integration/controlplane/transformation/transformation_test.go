@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -123,6 +124,13 @@ func newTransformTest(tb testing.TB, config transformTestConfig) (*transformTest
 		e.cleanUp()
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	
+	// See EKS-PRIVATE-apiserver-healthz-upper-log-verbosity-fo.patch
+	prev := flag.Lookup("v").Value.(flag.Getter).Get().(klog.Level)
+	flag.Set("v", "6")
+	defer func() {
+		flag.Set("v", prev.String())
+	}()
 
 	flags := e.getEncryptionOptions(config.reload)
 	if len(config.runtimeConfig) > 0 {

@@ -121,6 +121,7 @@ func TestAddFlags(t *testing.T) {
 		"--kubelet-client-key=/var/run/kubernetes/server.key",
 		"--kubelet-certificate-authority=/var/run/kubernetes/caserver.crt",
 		"--tracing-config-file=/var/run/kubernetes/tracing_config.yaml",
+		"--proxy-cidr-whitelist=192.168.0.0/24",
 		"--proxy-client-cert-file=/var/run/kubernetes/proxy.crt",
 		"--proxy-client-key-file=/var/run/kubernetes/proxy.key",
 		"--request-timeout=2m",
@@ -128,6 +129,7 @@ func TestAddFlags(t *testing.T) {
 		"--service-cluster-ip-range=192.168.128.0/17",
 		"--lease-reuse-duration-seconds=100",
 		"--emulated-version=test=1.31",
+		"--enable-fast-count=true",
 	}
 	fs.Parse(args)
 	utilruntime.Must(componentGlobalsRegistry.Set())
@@ -162,11 +164,12 @@ func TestAddFlags(t *testing.T) {
 				StorageConfig: storagebackend.Config{
 					Type: "etcd3",
 					Transport: storagebackend.TransportConfig{
-						ServerList:     nil,
-						KeyFile:        "/var/run/kubernetes/etcd.key",
-						TrustedCAFile:  "/var/run/kubernetes/etcdca.crt",
-						CertFile:       "/var/run/kubernetes/etcdce.crt",
-						TracerProvider: noopoteltrace.NewTracerProvider(),
+						ServerList:         nil,
+						KeyFile:            "/var/run/kubernetes/etcd.key",
+						TrustedCAFile:      "/var/run/kubernetes/etcdca.crt",
+						CertFile:           "/var/run/kubernetes/etcdce.crt",
+						InsecureSkipVerify: true,
+						TracerProvider:     noopoteltrace.NewTracerProvider(),
 					},
 					Prefix:                "/registry",
 					CompactionInterval:    storagebackend.DefaultCompactInterval,
@@ -179,6 +182,7 @@ func TestAddFlags(t *testing.T) {
 						ReuseDurationSeconds: 100,
 						MaxObjectCount:       1000,
 					},
+					EnableFastCount: true,
 				},
 				DefaultStorageMediaType: "application/vnd.kubernetes.protobuf",
 				DeleteCollectionWorkers: 1,
@@ -310,6 +314,7 @@ func TestAddFlags(t *testing.T) {
 			ServiceClusterIPRanges: (&net.IPNet{IP: netutils.ParseIPSloppy("192.168.128.0"), Mask: net.CIDRMask(17, 32)}).String(),
 			EndpointReconcilerType: string(reconcilers.LeaseEndpointReconcilerType),
 			AllowPrivileged:        false,
+			ProxyCIDRAllowlist:     kubeoptions.NewIPNetSlice("192.168.0.0/24"),
 			KubeletConfig: kubeletclient.KubeletClientConfig{
 				Port:         10250,
 				ReadOnlyPort: 10255,

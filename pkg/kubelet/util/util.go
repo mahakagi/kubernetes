@@ -18,9 +18,12 @@ package util
 
 import (
 	"fmt"
+	"os"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/util/filesystem"
 )
 
@@ -59,4 +62,20 @@ func GetContainerByIndex(containers []v1.Container, statuses []v1.ContainerStatu
 		return v1.Container{}, false
 	}
 	return containers[idx], true
+}
+
+// GetPodMaxCpuQuota, returns the max CPU quota that can be allocated to pod.
+func GetPodMaxCpuQuota(currentCpuQuota int64) int64 {
+	fargatePodCPULimit := os.Getenv("FARGATE_POD_CPU_LIMIT")
+
+	if fargatePodCPULimit != "" {
+		fargatePodCPUResource := resource.MustParse(fargatePodCPULimit)
+		fargatePodCPUQuota := fargatePodCPUResource.MilliValue() * 100
+
+		if currentCpuQuota > fargatePodCPUQuota {
+			klog.Infof("updating cpuQuota for pod from %v to %v", currentCpuQuota, fargatePodCPUQuota)
+			return fargatePodCPUQuota
+		}
+	}
+	return currentCpuQuota
 }

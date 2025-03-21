@@ -111,6 +111,22 @@ func ShouldPodBeInEndpoints(pod *v1.Pod, includeTerminating bool) bool {
 	return true
 }
 
+func SvcPodsHaveMultiAZSpread(pods []*v1.Pod, nodeLister v1listers.NodeLister) bool {
+	zoneCounts := make(map[string]bool)
+
+	for _, pod := range pods {
+		node, err := nodeLister.Get(pod.Spec.NodeName)
+		if err != nil {
+			// we are getting the information from the local informer,
+			// an error different than IsNotFound should not happen
+			// Regardless we ignore such pods for calculations
+			continue
+		}
+		zoneCounts[node.Labels[v1.LabelTopologyZone]] = true
+	}
+	return len(zoneCounts) > 1
+}
+
 // ShouldSetHostname returns true if the Hostname attribute should be set on an
 // Endpoints Address or EndpointSlice Endpoint.
 func ShouldSetHostname(pod *v1.Pod, svc *v1.Service) bool {

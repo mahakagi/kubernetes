@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "false"
+    "fargate.eks.amazonaws.com/admitMessage": "Pod not supported: invalid SecurityContext fields: Capabilities added: NET_ADMIN, IPC_LOCK, LINUX_IMMUTABLE, SYS_PTRACE, SYS_RESOURCE"
+  name: init-security-context
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  initContainers:
+    - image: nginx:alpine
+      name: nginx
+      securityContext:
+        capabilities:
+          add:
+            - "NET_ADMIN"
+            - "IPC_LOCK"
+            - "LINUX_IMMUTABLE"
+            - "SYS_PTRACE"
+            - "SYS_RESOURCE"
+  containers:
+    - image: nginx:alpine
+      name: nginx
+      volumeMounts:
+        - mountPath: /mnt/scratch
+          name: scratch
+  volumes:
+    - name: scratch
+      emptyDir: {}

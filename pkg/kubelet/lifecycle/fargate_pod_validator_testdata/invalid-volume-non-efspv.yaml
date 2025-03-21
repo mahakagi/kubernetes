@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "false"
+    "fargate.eks.amazonaws.com/admitMessage": "Pod not supported: ebs-vol is of an unsupported volume Type, invalid-vol not supported because: PVC pvc-with-nonefs-pv bound to invalid PV not-an-efs-pv with CSI Driver: ebs.csi.aws.com, invalid-vol2 not supported because: PVC pvc-with-nocsi-pv bound to invalid PV no-csi-pv with nil CSI spec"
+  name: ebs-volume-pod
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  containers:
+    - image: nginx:alpine
+      name: nginx
+      volumeMounts:
+        - mountPath: /mnt/ebs
+          name: ebs-vol
+          readOnly: false
+  volumes:
+    - name: ebs-vol
+      awsElasticBlockStore:
+        volumeID: vol-abc123
+        fsType: ext4
+    - name: invalid-vol
+      persistentVolumeClaim:
+        claimName: pvc-with-nonefs-pv
+    - name: invalid-vol2
+      persistentVolumeClaim:
+        claimName: pvc-with-nocsi-pv

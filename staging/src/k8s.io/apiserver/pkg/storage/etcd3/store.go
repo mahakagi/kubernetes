@@ -83,9 +83,11 @@ type store struct {
 	groupResource       schema.GroupResource
 	groupResourceString string
 	watcher             *watcher
+	maxPageSize         int64
 	leaseManager        *leaseManager
 	decoder             Decoder
 	listErrAggrFactory  func() ListErrorAggregator
+	enableFastCount     bool
 
 	resourcePrefix string
 	newListFunc    func() runtime.Object
@@ -95,6 +97,15 @@ func (s *store) RequestWatchProgress(ctx context.Context) error {
 	// Use watchContext to match ctx metadata provided when creating the watch.
 	// In best case scenario we would use the same context that watch was created, but there is no way access it from watchCache.
 	return s.client.RequestProgress(s.watchContext(ctx))
+}
+
+// PagingConfig groups the parameter related with paging inside GetList calls.
+// The main reason for paging is to protect etcd from returning unlimited list of items.
+// Because etcd buffers all of the response in memory before returning it to the client,
+// there is a possiblity of using too much memory and get killed by OOM killer.
+type PagingConfig struct {
+	// MaximumPageSize is a maximum page limit used when fetching objects from etcd.
+	MaximumPageSize int64
 }
 
 type objState struct {
@@ -137,20 +148,20 @@ func (a *abortOnFirstError) Aggregate(key string, err error) bool {
 func (a *abortOnFirstError) Err() error { return a.err }
 
 // New returns an etcd3 implementation of storage.Interface.
-func New(c *kubernetes.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, leaseManagerConfig LeaseManagerConfig, decoder Decoder, versioner storage.Versioner) storage.Interface {
+func New(c *kubernetes.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, pagingConfig PagingConfig, leaseManagerConfig LeaseManagerConfig, decoder Decoder, versioner storage.Versioner, enableFastCount bool) storage.Interface {
 	if utilfeature.DefaultFeatureGate.Enabled(features.AllowUnsafeMalformedObjectDeletion) {
 		transformer = WithCorruptObjErrorHandlingTransformer(transformer)
 		decoder = WithCorruptObjErrorHandlingDecoder(decoder)
 	}
 	var store storage.Interface
-	store = newStore(c, codec, newFunc, newListFunc, prefix, resourcePrefix, groupResource, transformer, leaseManagerConfig, decoder, versioner)
+	store = newStore(c, codec, newFunc, newListFunc, prefix, resourcePrefix, groupResource, transformer, pagingConfig, leaseManagerConfig, decoder, versioner, enableFastCount)
 	if utilfeature.DefaultFeatureGate.Enabled(features.AllowUnsafeMalformedObjectDeletion) {
 		store = NewStoreWithUnsafeCorruptObjectDeletion(store, groupResource)
 	}
 	return store
 }
 
-func newStore(c *kubernetes.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, leaseManagerConfig LeaseManagerConfig, decoder Decoder, versioner storage.Versioner) *store {
+func newStore(c *kubernetes.Client, codec runtime.Codec, newFunc, newListFunc func() runtime.Object, prefix, resourcePrefix string, groupResource schema.GroupResource, transformer value.Transformer, pagingConfig PagingConfig, leaseManagerConfig LeaseManagerConfig, decoder Decoder, versioner storage.Versioner, enableFastCount bool) *store {
 	// for compatibility with etcd2 impl.
 	// no-op for default prefix of '/registry'.
 	// keeps compatibility with etcd2 impl for custom prefixes that don't start with '/'
@@ -183,6 +194,7 @@ func newStore(c *kubernetes.Client, codec runtime.Codec, newFunc, newListFunc fu
 		codec:               codec,
 		versioner:           versioner,
 		transformer:         transformer,
+		maxPageSize:         pagingConfig.MaximumPageSize,
 		pathPrefix:          pathPrefix,
 		groupResource:       groupResource,
 		groupResourceString: groupResource.String(),
@@ -190,9 +202,14 @@ func newStore(c *kubernetes.Client, codec runtime.Codec, newFunc, newListFunc fu
 		leaseManager:        newDefaultLeaseManager(c.Client, leaseManagerConfig),
 		decoder:             decoder,
 		listErrAggrFactory:  listErrAggrFactory,
+		enableFastCount:     enableFastCount,
 
 		resourcePrefix: resourcePrefix,
 		newListFunc:    newListFunc,
+	}
+
+	if s.maxPageSize <= 0 {
+		s.maxPageSize = maxLimit
 	}
 
 	w.getCurrentStorageRV = func(ctx context.Context) (uint64, error) {
@@ -239,7 +256,7 @@ func (s *store) Get(ctx context.Context, key string, opts storage.GetOptions, ou
 
 	err = s.decoder.Decode(data, out, getResp.KV.ModRevision)
 	if err != nil {
-		recordDecodeError(s.groupResourceString, preparedKey)
+		recordDecodeError(s.groupResourceString, preparedKey, err)
 		return err
 	}
 	return nil
@@ -304,7 +321,7 @@ func (s *store) Create(ctx context.Context, key string, obj, out runtime.Object,
 		err = s.decoder.Decode(data, out, txnResp.Revision)
 		if err != nil {
 			span.AddEvent("decode failed", attribute.Int("len", len(data)), attribute.String("err", err.Error()))
-			recordDecodeError(s.groupResourceString, preparedKey)
+			recordDecodeError(s.groupResourceString, preparedKey, err)
 			return err
 		}
 		span.AddEvent("decode succeeded", attribute.Int("len", len(data)))
@@ -425,7 +442,7 @@ func (s *store) conditionalDelete(
 		if !skipTransformDecode {
 			err = s.decoder.Decode(origState.data, out, txnResp.Revision)
 			if err != nil {
-				recordDecodeError(s.groupResourceString, key)
+				recordDecodeError(s.groupResourceString, key, err)
 				return err
 			}
 		}
@@ -542,7 +559,7 @@ func (s *store) GuaranteedUpdate(
 			if !origState.stale {
 				err = s.decoder.Decode(origState.data, destination, origState.rev)
 				if err != nil {
-					recordDecodeError(s.groupResourceString, preparedKey)
+					recordDecodeError(s.groupResourceString, preparedKey, err)
 					return err
 				}
 				return nil
@@ -592,7 +609,7 @@ func (s *store) GuaranteedUpdate(
 		err = s.decoder.Decode(data, destination, txnResp.Revision)
 		if err != nil {
 			span.AddEvent("decode failed", attribute.Int("len", len(data)), attribute.String("err", err.Error()))
-			recordDecodeError(s.groupResourceString, preparedKey)
+			recordDecodeError(s.groupResourceString, preparedKey, err)
 			return err
 		}
 		span.AddEvent("decode succeeded", attribute.Int("len", len(data)))
@@ -708,10 +725,14 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 
 	// set the appropriate clientv3 options to filter the returned data set
 	limit := opts.Predicate.Limit
-	paging := opts.Predicate.Limit > 0
+	// Put a default limit if no limit specified and cap it at max value.
+	if limit <= 0 || limit > s.maxPageSize {
+		limit = s.maxPageSize
+	}
+	paging := true
 	newItemFunc := getNewItemFunc(listObj, v)
 
-	withRev, continueKey, err := storage.ValidateListOptions(keyPrefix, s.versioner, opts)
+	withRev, continueKey, remainingCount, err := storage.ValidateListOptions(keyPrefix, s.versioner, opts)
 	if err != nil {
 		return err
 	}
@@ -722,9 +743,16 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 	var getResp kubernetes.ListResponse
 	var numFetched int
 	var numEvald int
+	var pages int
 	// Because these metrics are for understanding the costs of handling LIST requests,
 	// get them recorded even in error cases.
+	start := time.Now()
 	defer func() {
+		if err == nil {
+			// quantify the list from storage latency
+			metrics.RecordListStorageLatency(s.groupResourceString, start)
+		}
+		span.AddEvent("fetched all pages from etcd", attribute.String("page-count", strconv.FormatInt(int64(pages), 10)))
 		numReturn := v.Len()
 		metrics.RecordStorageListMetrics(s.groupResourceString, numFetched, numEvald, numReturn)
 	}()
@@ -735,18 +763,25 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 	}
 
 	aggregator := s.listErrAggrFactory()
+	isFastCountCall := false
+	if !opts.Recursive || (len(opts.Predicate.Continue) > 0 && remainingCount > 0 && s.enableFastCount) {
+		klog.V(8).Info("invoking fastCount")
+		isFastCountCall = true
+	}
 	for {
 		startTime := time.Now()
 		getResp, err = s.getList(ctx, keyPrefix, opts.Recursive, kubernetes.ListOptions{
-			Revision: withRev,
-			Limit:    limit,
-			Continue: continueKey,
+			Revision:        withRev,
+			Limit:           limit,
+			EnableFastCount: isFastCountCall,
+			Continue:        continueKey,
 		})
 		metrics.RecordEtcdRequest(metricsOp, s.groupResourceString, err, startTime)
 		if err != nil {
 			return interpretListError(err, len(opts.Predicate.Continue) > 0, continueKey, keyPrefix)
 		}
 		numFetched += len(getResp.Kvs)
+		pages++
 		if err = s.validateMinimumResourceVersion(opts.ResourceVersion, uint64(getResp.Revision)); err != nil {
 			return err
 		}
@@ -770,7 +805,7 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 
 		// take items from the response until the bucket is full, filtering as we go
 		for i, kv := range getResp.Kvs {
-			if paging && int64(v.Len()) >= opts.Predicate.Limit {
+			if opts.Predicate.Limit > 0 && int64(v.Len()) >= opts.Predicate.Limit {
 				hasMore = true
 				break
 			}
@@ -794,7 +829,7 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 
 			obj, err := s.decoder.DecodeListItem(ctx, data, uint64(kv.ModRevision), newItemFunc)
 			if err != nil {
-				recordDecodeError(s.groupResourceString, string(kv.Key))
+				recordDecodeError(s.groupResourceString, string(kv.Key), err)
 				if done := aggregator.Aggregate(string(kv.Key), err); done {
 					return aggregator.Err()
 				}
@@ -818,16 +853,16 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 			break
 		}
 		// we're paging but we have filled our bucket
-		if int64(v.Len()) >= opts.Predicate.Limit {
+		if opts.Predicate.Limit > 0 && int64(v.Len()) >= opts.Predicate.Limit {
 			break
 		}
 
-		if limit < maxLimit {
+		if limit < s.maxPageSize {
 			// We got incomplete result due to field/label selector dropping the object.
 			// Double page size to reduce total number of calls to etcd.
 			limit *= 2
-			if limit > maxLimit {
-				limit = maxLimit
+			if limit > s.maxPageSize {
+				limit = s.maxPageSize
 			}
 		}
 	}
@@ -835,13 +870,22 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 	if err := aggregator.Err(); err != nil {
 		return err
 	}
+	var ric int64
+	if isFastCountCall && s.enableFastCount {
+		// Assign RIC from previois call to getResp.Count, i.e; remainingItemCount for current call is calculated using
+		//remainingCount yeilded from decoding previous ContinueToken.
+		// More details on RIC - https://quip-amazon.com/CjrMAniPg7Zn/etcdAPIServer-LIST-Optimization-Migration-Plan
+		ric = remainingCount
+	} else {
+		ric = getResp.Count
+	}
 
 	if v.IsNil() {
 		// Ensure that we never return a nil Items pointer in the result for consistency.
 		v.Set(reflect.MakeSlice(v.Type(), 0, 0))
 	}
 
-	continueValue, remainingItemCount, err := storage.PrepareContinueToken(string(lastKey), keyPrefix, withRev, getResp.Count, hasMore, opts)
+	continueValue, remainingItemCount, err := storage.PrepareContinueToken(string(lastKey), keyPrefix, withRev, ric, hasMore, opts, s.enableFastCount)
 	if err != nil {
 		return err
 	}
@@ -979,7 +1023,7 @@ func (s *store) getState(ctx context.Context, kv *mvccpb.KeyValue, key string, v
 		state.stale = stale
 
 		if err := s.decoder.Decode(state.data, state.obj, state.rev); err != nil {
-			recordDecodeError(s.groupResourceString, key)
+			recordDecodeError(s.groupResourceString, key, err)
 			return nil, err
 		}
 	}
@@ -1073,9 +1117,9 @@ func (s *store) prepareKey(key string) (string, error) {
 }
 
 // recordDecodeError record decode error split by object type.
-func recordDecodeError(resource string, key string) {
+func recordDecodeError(resource string, key string, err error) {
 	metrics.RecordDecodeError(resource)
-	klog.V(4).Infof("Decoding %s \"%s\" failed", resource, key)
+	klog.V(2).Infof("Decoding %s \"%s\" failed due to %s", resource, key, err)
 }
 
 // getTypeName returns type name of an object for reporting purposes.

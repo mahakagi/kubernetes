@@ -62,6 +62,15 @@ var ipv6only = []v1.IPFamily{v1.IPv6Protocol}
 var ipv4ipv6 = []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol}
 var ipv6ipv4 = []v1.IPFamily{v1.IPv6Protocol, v1.IPv4Protocol}
 
+func testNode(id int, zone string) *v1.Node {
+	n := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("node%d", id),
+			Labels: map[string]string{v1.LabelTopologyZone: zone},
+		},
+	}
+	return n
+}
+
 func testPod(namespace string, id int, nPorts int, isReady bool, ipFamilies []v1.IPFamily) *v1.Pod {
 	p := &v1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1"},
@@ -120,6 +129,15 @@ func addBadIPPod(store cache.Store, namespace string, ipFamilies []v1.IPFamily) 
 	pod.Status.PodIPs[0].IP = "0" + pod.Status.PodIPs[0].IP
 	pod.Status.PodIP = pod.Status.PodIPs[0].IP
 	store.Add(pod)
+}
+
+func addPodsWithNode(store cache.Store, namespace string, nPods int, nPorts int, nNotReady int, ipFamilies []v1.IPFamily) {
+	for i := 0; i < nPods+nNotReady; i++ {
+		isReady := i < nPods
+		pod := testPod(namespace, i, nPorts, isReady, ipFamilies)
+		pod.Spec.NodeName = fmt.Sprintf("node%d", i)
+		store.Add(pod)
+	}
 }
 
 func addNotReadyPodsWithSpecifiedRestartPolicyAndPhase(store cache.Store, namespace string, nPods int, nPorts int, restartPolicy v1.RestartPolicy, podPhase v1.PodPhase) {
@@ -234,13 +252,14 @@ type endpointController struct {
 	podStore       cache.Store
 	serviceStore   cache.Store
 	endpointsStore cache.Store
+	nodeStore      cache.Store
 }
 
 func newController(ctx context.Context, url string, batchPeriod time.Duration) *endpointController {
 	client := clientset.NewForConfigOrDie(&restclient.Config{Host: url, ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}, ContentType: runtime.ContentTypeJSON}})
 	informerFactory := informers.NewSharedInformerFactory(client, controllerpkg.NoResyncPeriodFunc())
 	endpoints := NewEndpointController(ctx, informerFactory.Core().V1().Pods(), informerFactory.Core().V1().Services(),
-		informerFactory.Core().V1().Endpoints(), client, batchPeriod)
+		informerFactory.Core().V1().Endpoints(), informerFactory.Core().V1().Nodes(), client, batchPeriod)
 	endpoints.podsSynced = alwaysReady
 	endpoints.servicesSynced = alwaysReady
 	endpoints.endpointsSynced = alwaysReady
@@ -249,6 +268,7 @@ func newController(ctx context.Context, url string, batchPeriod time.Duration) *
 		informerFactory.Core().V1().Pods().Informer().GetStore(),
 		informerFactory.Core().V1().Services().Informer().GetStore(),
 		informerFactory.Core().V1().Endpoints().Informer().GetStore(),
+		informerFactory.Core().V1().Nodes().Informer().GetStore(),
 	}
 }
 
@@ -261,6 +281,7 @@ func newFakeController(ctx context.Context, batchPeriod time.Duration) (*fake.Cl
 		informerFactory.Core().V1().Pods(),
 		informerFactory.Core().V1().Services(),
 		informerFactory.Core().V1().Endpoints(),
+		informerFactory.Core().V1().Nodes(),
 		client,
 		batchPeriod)
 
@@ -273,7 +294,205 @@ func newFakeController(ctx context.Context, batchPeriod time.Duration) (*fake.Cl
 		informerFactory.Core().V1().Pods().Informer().GetStore(),
 		informerFactory.Core().V1().Services().Informer().GetStore(),
 		informerFactory.Core().V1().Endpoints().Informer().GetStore(),
+		informerFactory.Core().V1().Nodes().Informer().GetStore(),
 	}
+}
+
+func TestSyncEndpointsSRBLabelAppliedPodMultiAZSpreadTrue(t *testing.T) {
+	ns := metav1.NamespaceDefault
+	tCtx := ktesting.Init(t)
+	testServer, endpointsHandler := makeTestServer(t, ns)
+	defer testServer.Close()
+	serviceLabels := map[string]string{"eks-arc-zonal-shift/impaired-zone": "zone0", LabelManagedBy: ControllerName, "foo": "bar"}
+	endpoints := newController(tCtx, testServer.URL, 0*time.Second)
+	addPodsWithNode(endpoints.podStore, ns, 3, 2, 0, ipv4only)
+	endpoints.nodeStore.Add(testNode(0, "zone0"))
+	endpoints.nodeStore.Add(testNode(1, "zone1"))
+	endpoints.nodeStore.Add(testNode(2, "zone2"))
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{
+				{IP: "1.2.3.4", NodeName: pointer.String("node0"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
+				{IP: "1.2.3.5", NodeName: pointer.String("node1"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod1", Namespace: ns}},
+				{IP: "1.2.3.6", NodeName: pointer.String("node2"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod2", Namespace: ns}},
+			},
+			Ports: []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
+	endpoints.serviceStore.Add(&v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: ns,
+			Labels:    serviceLabels,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: map[string]string{"foo": "bar"},
+			Ports: []v1.ServicePort{
+				{Name: "port0", Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt32(8080)},
+				{Name: "port1", Port: 88, Protocol: "TCP", TargetPort: intstr.FromInt32(8088)},
+			},
+			IPFamilies: []v1.IPFamily{v1.IPv4Protocol},
+		},
+	})
+	endpoints.syncService(context.TODO(), ns+"/foo")
+
+	expectedSubsets := []v1.EndpointSubset{{
+		Addresses: []v1.EndpointAddress{
+			{IP: "1.2.3.5", NodeName: pointer.String("node1"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod1", Namespace: ns}},
+			{IP: "1.2.3.6", NodeName: pointer.String("node2"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod2", Namespace: ns}},
+		},
+		Ports: []v1.EndpointPort{
+			{Name: "port0", Port: 8080, Protocol: "TCP"},
+			{Name: "port1", Port: 8088, Protocol: "TCP"},
+		},
+	}}
+	serviceLabels[v1.IsHeadlessService] = ""
+	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			ResourceVersion: "1",
+			Name:            "foo",
+			Namespace:       ns,
+			Labels:          serviceLabels,
+		},
+		Subsets: endptspkg.SortSubsets(expectedSubsets),
+	})
+	endpointsHandler.ValidateRequestCount(t, 1)
+	endpointsHandler.ValidateRequest(t, "/api/v1/namespaces/"+ns+"/endpoints/foo", "PUT", &data)
+}
+
+func TestSyncEndpointsSRBLabelAppliedPodMultiAZSpreadFalse(t *testing.T) {
+	ns := metav1.NamespaceDefault
+	tCtx := ktesting.Init(t)
+	testServer, endpointsHandler := makeTestServer(t, ns)
+	defer testServer.Close()
+	serviceLabels := map[string]string{"eks-arc-zonal-shift/impaired-zone": "zone0", LabelManagedBy: ControllerName, "foo": "bar"}
+	endpoints := newController(tCtx, testServer.URL, 0*time.Second)
+	addPodsWithNode(endpoints.podStore, ns, 2, 2, 0, ipv4only)
+	endpoints.nodeStore.Add(testNode(0, "zone0"))
+	endpoints.nodeStore.Add(testNode(1, "zone0"))
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{
+				{IP: "1.2.3.4", NodeName: pointer.String("node0"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
+				{IP: "1.2.3.5", NodeName: pointer.String("node1"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod1", Namespace: ns}},
+			},
+			Ports: []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
+	endpoints.serviceStore.Add(&v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: ns,
+			Labels:    serviceLabels,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: map[string]string{"foo": "bar"},
+			Ports: []v1.ServicePort{
+				{Name: "port0", Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt32(8080)},
+				{Name: "port1", Port: 88, Protocol: "TCP", TargetPort: intstr.FromInt32(8088)},
+			},
+			IPFamilies: []v1.IPFamily{v1.IPv4Protocol},
+		},
+	})
+	endpoints.syncService(context.TODO(), ns+"/foo")
+
+	expectedSubsets := []v1.EndpointSubset{{
+		Addresses: []v1.EndpointAddress{
+			{IP: "1.2.3.4", NodeName: pointer.String("node0"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
+			{IP: "1.2.3.5", NodeName: pointer.String("node1"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod1", Namespace: ns}},
+		},
+		Ports: []v1.EndpointPort{
+			{Name: "port0", Port: 8080, Protocol: "TCP"},
+			{Name: "port1", Port: 8088, Protocol: "TCP"},
+		},
+	}}
+	serviceLabels[v1.IsHeadlessService] = ""
+	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			ResourceVersion: "1",
+			Name:            "foo",
+			Namespace:       ns,
+			Labels:          serviceLabels,
+		},
+		Subsets: endptspkg.SortSubsets(expectedSubsets),
+	})
+	endpointsHandler.ValidateRequestCount(t, 1)
+	endpointsHandler.ValidateRequest(t, "/api/v1/namespaces/"+ns+"/endpoints/foo", "PUT", &data)
+}
+
+func TestSyncEndpointsSRBLabelAppliedPodsNotInAffectedZone(t *testing.T) {
+	ns := metav1.NamespaceDefault
+	tCtx := ktesting.Init(t)
+	testServer, endpointsHandler := makeTestServer(t, ns)
+	defer testServer.Close()
+	serviceLabels := map[string]string{"eks-arc-zonal-shift/impaired-zone": "zone0", LabelManagedBy: ControllerName, "foo": "bar"}
+	endpoints := newController(tCtx, testServer.URL, 0*time.Second)
+	addPodsWithNode(endpoints.podStore, ns, 2, 2, 0, ipv4only)
+	endpoints.nodeStore.Add(testNode(0, "zone1"))
+	endpoints.nodeStore.Add(testNode(1, "zone1"))
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{
+				{IP: "1.2.3.4", NodeName: pointer.String("node0"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
+				{IP: "1.2.3.5", NodeName: pointer.String("node1"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod1", Namespace: ns}},
+			},
+			Ports: []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
+	endpoints.serviceStore.Add(&v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: ns,
+			Labels:    serviceLabels,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: map[string]string{"foo": "bar"},
+			Ports: []v1.ServicePort{
+				{Name: "port0", Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt32(8080)},
+				{Name: "port1", Port: 88, Protocol: "TCP", TargetPort: intstr.FromInt32(8088)},
+			},
+			IPFamilies: []v1.IPFamily{v1.IPv4Protocol},
+		},
+	})
+	endpoints.syncService(context.TODO(), ns+"/foo")
+
+	expectedSubsets := []v1.EndpointSubset{{
+		Addresses: []v1.EndpointAddress{
+			{IP: "1.2.3.4", NodeName: pointer.String("node0"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
+			{IP: "1.2.3.5", NodeName: pointer.String("node1"), TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod1", Namespace: ns}},
+		},
+		Ports: []v1.EndpointPort{
+			{Name: "port0", Port: 8080, Protocol: "TCP"},
+			{Name: "port1", Port: 8088, Protocol: "TCP"},
+		},
+	}}
+	serviceLabels[v1.IsHeadlessService] = ""
+	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			ResourceVersion: "1",
+			Name:            "foo",
+			Namespace:       ns,
+			Labels:          serviceLabels,
+		},
+		Subsets: endptspkg.SortSubsets(expectedSubsets),
+	})
+	endpointsHandler.ValidateRequestCount(t, 1)
+	endpointsHandler.ValidateRequest(t, "/api/v1/namespaces/"+ns+"/endpoints/foo", "PUT", &data)
 }
 
 func TestSyncEndpointsItemsPreserveNoSelector(t *testing.T) {

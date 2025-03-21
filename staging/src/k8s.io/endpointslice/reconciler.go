@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,6 +76,11 @@ type endpointMeta struct {
 	ports       []discovery.EndpointPort
 	addressType discovery.AddressType
 }
+
+// This is duplicated in - pkg/util/constants/constants.go
+const (
+	impairedZoneLabel = "eks-arc-zonal-shift/impaired-zone"
+)
 
 // Reconcile takes a set of pods currently matching a service selector and
 // compares them with the endpoints already present in any existing endpoint
@@ -167,6 +173,24 @@ func (r *Reconciler) reconcileByAddressType(logger klog.Logger, service *corev1.
 	desiredMetaByPortMap := map[endpointsliceutil.PortMapKey]*endpointMeta{}
 	desiredEndpointsByPortMap := map[endpointsliceutil.PortMapKey]endpointsliceutil.EndpointSet{}
 
+	// Kube-proxy looks at endpointslices and endpoints to setup iptable rules on the node
+	// If an address is missing in endpoints or endpoints in endpointslices k-proxy wont setup iptable rules
+	// We have a codepath different for endpoints and endpointslices so we need to patch both to have consistent addresses
+	// We SyncService for every pod/svc/node change, we can reliably use pods for svc and their nodes to decide AZ spread as they dont change
+	// Note: These operations do not gurantee atomicity so it wont prevent multi-zone weigh away case
+	// However az-poller ensures SRB operations on a cluster is atomic - https://gitlab.aws.dev/eks-dataplane/eks-dataplane-az-poller/-/merge_requests/52
+	impairedZone := ""
+	multiAZSpread := false
+	if z, exists := service.Labels[impairedZoneLabel]; exists {
+		multiAZSpread = endpointsliceutil.SvcPodsHaveMultiAZSpread(pods, r.nodeLister)
+		if multiAZSpread {
+			logger.V(2).Info("Pods will be weighed away for the Service", "service", klog.KObj(service))
+		} else {
+			logger.V(2).Info("Pods will not be weighed away for the Service as they are not spread across AZs.", "service", klog.KObj(service))
+		}
+		impairedZone = z
+	}
+
 	for _, pod := range pods {
 		if !endpointsliceutil.ShouldPodBeInEndpoints(pod, true) {
 			continue
@@ -206,6 +230,14 @@ func (r *Reconciler) reconcileByAddressType(logger klog.Logger, service *corev1.
 			}
 		}
 		endpoint := podToEndpoint(pod, node, service, addressType)
+
+		// We want to skip adding endpoint to the endpointslice for a svc if brb is pressed
+		if multiAZSpread && node.Labels[v1.LabelTopologyZone] == impairedZone {
+			logger.V(2).Info("Pod endpoint will be removed from endpointslice for the Service", "pod", klog.KObj(pod), "service", klog.KObj(service))
+			metrics.EpSliceEndpointsRemovedByZoneLabel.WithLabelValues(service.Name, service.Namespace, impairedZone).Inc()
+			continue
+		}
+
 		if len(endpoint.Addresses) > 0 {
 			desiredEndpointsByPortMap[epHash].Insert(&endpoint)
 		}

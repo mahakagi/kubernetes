@@ -123,6 +123,7 @@ func TestAddFlags(t *testing.T) {
 		"--storage-backend=etcd3",
 		"--lease-reuse-duration-seconds=100",
 		"--emulated-version=test=1.31",
+		"--enable-fast-count=true",
 	}
 	fs.Parse(args)
 	utilruntime.Must(componentGlobalsRegistry.Set())
@@ -156,11 +157,12 @@ func TestAddFlags(t *testing.T) {
 			StorageConfig: storagebackend.Config{
 				Type: "etcd3",
 				Transport: storagebackend.TransportConfig{
-					ServerList:     nil,
-					KeyFile:        "/var/run/kubernetes/etcd.key",
-					TrustedCAFile:  "/var/run/kubernetes/etcdca.crt",
-					CertFile:       "/var/run/kubernetes/etcdce.crt",
-					TracerProvider: noopoteltrace.NewTracerProvider(),
+					ServerList:         nil,
+					KeyFile:            "/var/run/kubernetes/etcd.key",
+					TrustedCAFile:      "/var/run/kubernetes/etcdca.crt",
+					CertFile:           "/var/run/kubernetes/etcdce.crt",
+					InsecureSkipVerify: true,
+					TracerProvider:     noopoteltrace.NewTracerProvider(),
 				},
 				Prefix:                "/registry",
 				CompactionInterval:    storagebackend.DefaultCompactInterval,
@@ -173,6 +175,7 @@ func TestAddFlags(t *testing.T) {
 					ReuseDurationSeconds: 100,
 					MaxObjectCount:       1000,
 				},
+				EnableFastCount: true,
 			},
 			DefaultStorageMediaType: "application/vnd.kubernetes.protobuf",
 			DeleteCollectionWorkers: 1,

@@ -58,6 +58,7 @@ import (
 	"k8s.io/kubernetes/pkg/controller/tainteviction"
 	controllerutil "k8s.io/kubernetes/pkg/controller/util/node"
 	"k8s.io/kubernetes/pkg/features"
+	constants "k8s.io/kubernetes/pkg/util/constants"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 )
 
@@ -993,10 +994,47 @@ func (nc *Controller) tryUpdateNodeHealth(ctx context.Context, node *v1.Node) (t
 	return gracePeriod, observedReadyCondition, currentReadyCondition, nil
 }
 
+func hasSRBTaintEffectNoSchedule(node v1.Node) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == constants.ImpairedZoneLabel && taint.Effect == v1.TaintEffectNoSchedule {
+			return true
+		}
+	}
+	return false
+}
+
 func (nc *Controller) handleDisruption(ctx context.Context, zoneToNodeConditions map[string][]*v1.NodeCondition, nodes []*v1.Node) {
 	newZoneStates := map[string]ZoneState{}
 	allAreFullyDisrupted := true
 	logger := klog.FromContext(ctx)
+
+	// There is a partially disrupted zone since srb is pressed
+	// In this case we wanna stop all pod evictions in that zone
+	// We dont want to include this logic down below as disruption is checked wrt taints for srb, NodeReady conditions otherwise
+	// Note: These operations do not gurantee atomicity so it wont prevent multi-zone weigh away case
+	// However az-poller makes sure SRB operations on a cluster is atomic - https://gitlab.aws.dev/eks-dataplane/eks-dataplane-az-poller/-/merge_requests/52
+	zoneDisruptedBySRB := ""
+	for _, node := range nodes {
+		// logic here is if that node is cordoned and if its key value pair is
+		// impairedZone then remove NotReady and Unreachable taints added to the node
+		if hasSRBTaintEffectNoSchedule(*node) {
+			zoneDisruptedBySRB = nodetopology.GetZoneKey(node)
+			// Removes NoExecute taints, NoSchedule taint still exists
+			// Node is marked reachable to make sure TaintEvictionManager dont evict pods on the node
+			_, err := nc.markNodeAsReachable(ctx, node)
+			if err != nil {
+				logger.Error(nil, "Failed to remove taints from Node", "node", klog.KObj(node))
+			}
+		}
+	}
+	if len(zoneDisruptedBySRB) > 0 {
+		logger.V(2).Info("Controller detected that Nodes are tainted with srb zonal shift. Entering zone disruption mode", "zone", zoneDisruptedBySRB)
+		//Stop Evictions in the zone
+		nc.zoneNoExecuteTainter[zoneDisruptedBySRB].SwapLimiter(0)
+		nc.zoneStates[zoneDisruptedBySRB] = stateFullDisruption
+		return
+	}
+
 	for k, v := range zoneToNodeConditions {
 		zoneSize.WithLabelValues(k).Set(float64(len(v)))
 		unhealthy, newState := nc.computeZoneStateFunc(v)

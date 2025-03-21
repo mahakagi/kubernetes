@@ -57,6 +57,7 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubeapiserver"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
+	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 	rbacrest "k8s.io/kubernetes/pkg/registry/rbac/rest"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 )
@@ -276,12 +277,20 @@ func CreateConfig(
 	storageFactory *serverstorage.DefaultStorageFactory,
 	serviceResolver aggregatorapiserver.ServiceResolver,
 	additionalInitializers []admission.PluginInitializer,
+	proxyCIDRAllowlist kubeoptions.IPNetSlice,
 ) (
 	*Config,
 	[]admission.PluginInitializer,
 	error,
 ) {
 	proxyTransport := CreateProxyTransport()
+	if proxyCIDRAllowlist != nil {
+		var err error
+		proxyTransport, err = CreateOutboundDialer(proxyCIDRAllowlist)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
 	opts.Metrics.Apply()
 	serviceaccount.RegisterMetrics()

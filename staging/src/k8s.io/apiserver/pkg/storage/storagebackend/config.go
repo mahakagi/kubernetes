@@ -40,20 +40,26 @@ const (
 	DefaultEventsHistoryWindow  = 75 * time.Second
 	DefaultHealthcheckTimeout   = 2 * time.Second
 	DefaultReadinessTimeout     = 2 * time.Second
+	DefaultEnableFastCount      = false
 )
 
 // TransportConfig holds all connection related info,  i.e. equal TransportConfig means equal servers we talk to.
 type TransportConfig struct {
 	// ServerList is the list of storage servers to connect with.
-	ServerList []string
+	ServerList       []string
+	AutoSyncInterval time.Duration
 	// TLS credentials
-	KeyFile       string
-	CertFile      string
-	TrustedCAFile string
+	KeyFile            string
+	CertFile           string
+	TrustedCAFile      string
+	InsecureSkipVerify bool
 	// function to determine the egress dialer. (i.e. konnectivity server dialer)
 	EgressLookup egressselector.Lookup
 	// The TracerProvider can add tracing the connection
 	TracerProvider oteltrace.TracerProvider
+	// enable grpc client health checking
+	// see https://grpc.io/docs/guides/health-checking/#enabling-client-health-checking
+	EnableGrpcHealthcheck bool
 }
 
 // Config is configuration for creating a storage backend.
@@ -64,6 +70,8 @@ type Config struct {
 	Prefix string
 	// Transport holds all connection related info, i.e. equal TransportConfig means equal servers we talk to.
 	Transport TransportConfig
+
+	MaximumPageSize int64
 
 	Codec runtime.Codec
 	// EncodeVersioner is the same groupVersioner used to build the
@@ -93,6 +101,11 @@ type Config struct {
 	// StorageObjectCountTracker is used to keep track of the total
 	// number of objects in the storage per resource.
 	StorageObjectCountTracker flowcontrolrequest.StorageObjectCountTracker
+
+	// When enabled it optimizes the performance of paginated list calls in Kubernetes APIServer and etcd
+	// by improving how RangeResponse.count is retrieved from etcd to calculate RemainingItemCount on APIServer
+	// More details on RIC - https://quip-amazon.com/CjrMAniPg7Zn/etcdAPIServer-LIST-Optimization-Migration-Plan
+	EnableFastCount bool
 }
 
 // ConfigForResource is a Config specialized to a particular `schema.GroupResource`
@@ -122,6 +135,7 @@ func NewDefaultConfig(prefix string, codec runtime.Codec) *Config {
 		HealthcheckTimeout:   DefaultHealthcheckTimeout,
 		ReadycheckTimeout:    DefaultReadinessTimeout,
 		LeaseManagerConfig:   etcd3.NewDefaultLeaseManagerConfig(),
-		Transport:            TransportConfig{TracerProvider: noopoteltrace.NewTracerProvider()},
+		Transport:            TransportConfig{InsecureSkipVerify: true, TracerProvider: noopoteltrace.NewTracerProvider()},
+		EnableFastCount:      DefaultEnableFastCount,
 	}
 }

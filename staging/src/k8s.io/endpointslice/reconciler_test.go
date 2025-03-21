@@ -27,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -172,6 +173,9 @@ func TestReconcile1Pod(t *testing.T) {
 				"topology.kubernetes.io/zone":   "us-central1-a",
 				"topology.kubernetes.io/region": "us-central1",
 			},
+		},
+		Spec: v1.NodeSpec{
+			ProviderID: "aws:///zone0/i-abc",
 		},
 	}
 
@@ -1514,6 +1518,267 @@ func TestReconcilerFinalizeSvcDeletionTimestamp(t *testing.T) {
 				t.Errorf("Expected deleted EndpointSlice existence to be %t, got %t", tc.expectDeletedSlice, deletedSliceFound)
 			}
 		})
+	}
+}
+
+func TestReconcilerSRBLabelAppliedPodMultiAZSpreadFalse(t *testing.T) {
+	client := newClientset()
+	namespace := "test"
+	nodes := make([]*corev1.Node, 2)
+	nodes[0] = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{
+		corev1.LabelTopologyZone: "zone0",
+	}}, Spec: v1.NodeSpec{
+		ProviderID: "aws:///zone0/i-abc",
+	}}
+	nodes[1] = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{
+		corev1.LabelTopologyZone: "zone0",
+	}}, Spec: v1.NodeSpec{
+		ProviderID: "aws:///zone0/i-abc",
+	}}
+	pods := make([]*corev1.Pod, 2)
+	pods[0] = newPod(0, namespace, true, 1, false)
+	pods[0].Spec.NodeName = nodes[0].Name
+	pods[1] = newPod(1, namespace, true, 1, false)
+	pods[1].Spec.NodeName = nodes[1].Name
+
+	service, endpointMeta := newServiceAndEndpointMeta("foo", namespace)
+	service.Spec.ClusterIP = "10.0.0.10"
+	service.Labels = map[string]string{"eks-arc-zonal-shift/impaired-zone": "zone0", "foo": "bar"}
+
+	// existing slices
+	endpointSlice1 := newEmptyEndpointSlice(1, namespace, endpointMeta, service)
+	for i := 1; i < len(pods); i += 1 {
+		endpointSlice1.Endpoints = append(endpointSlice1.Endpoints, podToEndpoint(pods[i], &corev1.Node{}, &service, discovery.AddressTypeIPv4))
+	}
+	existingSlices := []*discovery.EndpointSlice{endpointSlice1}
+	createEndpointSlices(t, client, namespace, existingSlices)
+	r := newReconciler(client, nodes, defaultMaxEndpointsPerSlice)
+	reconcileHelper(t, r, &service, pods, existingSlices, time.Now())
+
+	// expected slices
+	expectedEndpointSlice := map[discovery.AddressType][]discovery.Endpoint{
+		discovery.AddressTypeIPv4: {
+			{
+				Addresses: []string{"1.2.3.5"},
+				Conditions: discovery.EndpointConditions{
+					Ready:       ptr.To(true),
+					Serving:     ptr.To(true),
+					Terminating: ptr.To(false),
+				},
+				Zone:     ptr.To("zone0"),
+				NodeName: ptr.To("node-1"),
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: namespace,
+					Name:      "pod1",
+				},
+			},
+			{
+				Addresses: []string{"1.2.3.4"},
+				Conditions: discovery.EndpointConditions{
+					Ready:       ptr.To(true),
+					Serving:     ptr.To(true),
+					Terminating: ptr.To(false),
+				},
+				Zone:     ptr.To("zone0"),
+				NodeName: ptr.To("node-0"),
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: namespace,
+					Name:      "pod0",
+				},
+			},
+		},
+	}
+
+	/// check if they are equal to see if they have been removed
+	slices := fetchEndpointSlices(t, client, namespace)
+	if len(slices) != len(expectedEndpointSlice) {
+		t.Fatalf("Expected %v EndpointSlice, got %d", len(expectedEndpointSlice), len(slices))
+	}
+	for _, slice := range slices {
+		expectedEndPointList := expectedEndpointSlice[slice.AddressType]
+		if expectedEndPointList == nil {
+			t.Fatalf("address type %v is not expected", slice.AddressType)
+		}
+		if len(slice.Endpoints) != len(expectedEndPointList) {
+			t.Fatalf("Expected %v Endpoint, got %d", len(expectedEndPointList), len(slice.Endpoints))
+		}
+		// for all endpoints check if endpoints match
+		for i, ep := range slice.Endpoints {
+			if !reflect.DeepEqual(ep, expectedEndPointList[i]) {
+				t.Fatalf("Expected endpoint: %+v, got: %+v", expectedEndPointList[i], ep)
+			}
+		}
+	}
+}
+
+func TestReconcilerSRBLabelAppliedPodsNotInAffectedZone(t *testing.T) {
+	client := newClientset()
+	namespace := "test"
+	nodes := make([]*corev1.Node, 2)
+	nodes[0] = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{
+		corev1.LabelTopologyZone: "zone0",
+	}}, Spec: v1.NodeSpec{
+		ProviderID: "aws:///zone0/i-abc",
+	}}
+	nodes[1] = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{
+		corev1.LabelTopologyZone: "zone0",
+	}}, Spec: v1.NodeSpec{
+		ProviderID: "aws:///zone0/i-abc",
+	}}
+	pods := make([]*corev1.Pod, 2)
+	pods[0] = newPod(0, namespace, true, 1, false)
+	pods[0].Spec.NodeName = nodes[0].Name
+	pods[1] = newPod(1, namespace, true, 1, false)
+	pods[1].Spec.NodeName = nodes[1].Name
+
+	service, endpointMeta := newServiceAndEndpointMeta("foo", namespace)
+	service.Spec.ClusterIP = "10.0.0.10"
+	service.Labels = map[string]string{"eks-arc-zonal-shift/impaired-zone": "zone1", "foo": "bar"}
+
+	// existing slices
+	endpointSlice1 := newEmptyEndpointSlice(1, namespace, endpointMeta, service)
+	for i := 1; i < len(pods); i += 1 {
+		endpointSlice1.Endpoints = append(endpointSlice1.Endpoints, podToEndpoint(pods[i], &corev1.Node{}, &service, discovery.AddressTypeIPv4))
+	}
+	existingSlices := []*discovery.EndpointSlice{endpointSlice1}
+	createEndpointSlices(t, client, namespace, existingSlices)
+	r := newReconciler(client, nodes, defaultMaxEndpointsPerSlice)
+	reconcileHelper(t, r, &service, pods, existingSlices, time.Now())
+
+	// expected slices
+	expectedEndpointSlice := map[discovery.AddressType][]discovery.Endpoint{
+		discovery.AddressTypeIPv4: {
+			{
+				Addresses: []string{"1.2.3.5"},
+				Conditions: discovery.EndpointConditions{
+					Ready:       ptr.To(true),
+					Serving:     ptr.To(true),
+					Terminating: ptr.To(false),
+				},
+				Zone:     ptr.To("zone0"),
+				NodeName: ptr.To("node-1"),
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: namespace,
+					Name:      "pod1",
+				},
+			},
+			{
+				Addresses: []string{"1.2.3.4"},
+				Conditions: discovery.EndpointConditions{
+					Ready:       ptr.To(true),
+					Serving:     ptr.To(true),
+					Terminating: ptr.To(false),
+				},
+				Zone:     ptr.To("zone0"),
+				NodeName: ptr.To("node-0"),
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: namespace,
+					Name:      "pod0",
+				},
+			},
+		},
+	}
+
+	/// check if they are equal to see if they have been removed
+	slices := fetchEndpointSlices(t, client, namespace)
+	if len(slices) != len(expectedEndpointSlice) {
+		t.Fatalf("Expected %v EndpointSlice, got %d", len(expectedEndpointSlice), len(slices))
+	}
+	for _, slice := range slices {
+		expectedEndPointList := expectedEndpointSlice[slice.AddressType]
+		if expectedEndPointList == nil {
+			t.Fatalf("address type %v is not expected", slice.AddressType)
+		}
+		if len(slice.Endpoints) != len(expectedEndPointList) {
+			t.Fatalf("Expected %v Endpoint, got %d", len(expectedEndPointList), len(slice.Endpoints))
+		}
+		// for all endpoints check if endpoints match
+		for i, ep := range slice.Endpoints {
+			if !reflect.DeepEqual(ep, expectedEndPointList[i]) {
+				t.Fatalf("Expected endpoint: %+v, got: %+v", expectedEndPointList[i], ep)
+			}
+		}
+	}
+}
+
+func TestReconcilerSRBLabelAppliedPodMultiAZSpreadTrue(t *testing.T) {
+	client := newClientset()
+	namespace := "test"
+	nodes := make([]*corev1.Node, 2)
+	nodes[0] = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{
+		corev1.LabelTopologyZone: "zone0",
+	}}, Spec: v1.NodeSpec{
+		ProviderID: "aws:///zone0/i-abc",
+	}}
+	nodes[1] = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{
+		corev1.LabelTopologyZone: "zone1",
+	}}, Spec: v1.NodeSpec{
+		ProviderID: "aws:///zone1/i-abc",
+	}}
+	pods := make([]*corev1.Pod, 2)
+	pods[0] = newPod(0, namespace, true, 1, false)
+	pods[0].Spec.NodeName = nodes[0].Name
+	pods[1] = newPod(1, namespace, true, 1, false)
+	pods[1].Spec.NodeName = nodes[1].Name
+
+	service, endpointMeta := newServiceAndEndpointMeta("foo", namespace)
+	service.Spec.ClusterIP = "10.0.0.10"
+	service.Labels = map[string]string{"eks-arc-zonal-shift/impaired-zone": "zone0", "foo": "bar"}
+
+	// existing slices
+	endpointSlice1 := newEmptyEndpointSlice(1, namespace, endpointMeta, service)
+	for i := 1; i < len(pods); i += 1 {
+		endpointSlice1.Endpoints = append(endpointSlice1.Endpoints, podToEndpoint(pods[i], &corev1.Node{}, &service, discovery.AddressTypeIPv4))
+	}
+	existingSlices := []*discovery.EndpointSlice{endpointSlice1}
+	createEndpointSlices(t, client, namespace, existingSlices)
+	r := newReconciler(client, nodes, defaultMaxEndpointsPerSlice)
+	reconcileHelper(t, r, &service, pods, existingSlices, time.Now())
+
+	// expected slices
+	expectedEndpointSlice := map[discovery.AddressType][]discovery.Endpoint{
+		discovery.AddressTypeIPv4: {
+			{
+				Addresses: []string{"1.2.3.5"},
+				Conditions: discovery.EndpointConditions{
+					Ready:       ptr.To(true),
+					Serving:     ptr.To(true),
+					Terminating: ptr.To(false),
+				},
+				Zone:     ptr.To("zone1"),
+				NodeName: ptr.To("node-1"),
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: namespace,
+					Name:      "pod1",
+				},
+			},
+		},
+	}
+
+	/// check if they are equal to see if they have been removed
+	slices := fetchEndpointSlices(t, client, namespace)
+	if len(slices) != len(expectedEndpointSlice) {
+		t.Fatalf("Expected %v EndpointSlice, got %d", len(expectedEndpointSlice), len(slices))
+	}
+	for _, slice := range slices {
+		expectedEndPointList := expectedEndpointSlice[slice.AddressType]
+		if expectedEndPointList == nil {
+			t.Fatalf("address type %v is not expected", slice.AddressType)
+		}
+		if len(slice.Endpoints) != len(expectedEndPointList) {
+			t.Fatalf("Expected %v Endpoint, got %d", len(expectedEndPointList), len(slice.Endpoints))
+		}
+		// for all endpoints check if endpoints match
+		for i, ep := range slice.Endpoints {
+			if !reflect.DeepEqual(ep, expectedEndPointList[i]) {
+				t.Fatalf("Expected endpoint: %+v, got: %+v", expectedEndPointList[i], ep)
+			}
+		}
 	}
 }
 

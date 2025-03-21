@@ -62,7 +62,12 @@ func (k Client) List(ctx context.Context, prefix string, opts ListOptions) (resp
 		rangeStart = opts.Continue
 	}
 	rangeEnd := clientv3.GetPrefixRangeEnd(prefix)
-	rangeResp, err := k.KV.Get(ctx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(opts.Limit), clientv3.WithRev(opts.Revision))
+	options := make([]clientv3.OpOption, 0, 4)
+	options = append(options, clientv3.WithRange(rangeEnd), clientv3.WithLimit(opts.Limit), clientv3.WithRev(opts.Revision))
+	if opts.EnableFastCount {
+		options = append(options, clientv3.WithFastCount())
+	}
+	rangeResp, err := k.KV.Get(ctx, rangeStart, options...)
 	if err != nil {
 		return resp, err
 	}

@@ -119,6 +119,7 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 			if obj.Logging.Format == "" {
 				obj.Logging.Format = "text"
 			}
+			obj.EnableProfilingHandler = true
 			obj.EnableSystemLogHandler = true
 			obj.MemoryThrottlingFactor = ptr.To(rand.Float64())
 			obj.LocalStorageCapacityIsolation = true

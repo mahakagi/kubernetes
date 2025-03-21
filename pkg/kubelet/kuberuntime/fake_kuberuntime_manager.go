@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/component-base/logs/logreduction"
@@ -121,6 +122,7 @@ func newFakeKubeRuntimeManager(runtimeService internalapi.RuntimeService, imageS
 		memoryThrottlingFactor: 0.9,
 		podLogsDirectory:       fakePodLogsDirectory,
 		allocationManager:      allocation.NewInMemoryManager(),
+		fargatePodValidator:    lifecycle.NewPodSpecValidator(fake.NewSimpleClientset()),
 	}
 
 	typedVersion, err := runtimeService.Version(ctx, kubeRuntimeAPIVersion)

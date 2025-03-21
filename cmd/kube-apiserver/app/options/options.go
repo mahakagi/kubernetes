@@ -46,6 +46,7 @@ type Extra struct {
 	AllowPrivileged           bool
 	KubeletConfig             kubeletclient.KubeletClientConfig
 	KubernetesServiceNodePort int
+	ProxyCIDRAllowlist        kubeoptions.IPNetSlice
 	// ServiceClusterIPRange is mapped to input provided by user
 	ServiceClusterIPRanges string
 	// PrimaryServiceClusterIPRange and SecondaryServiceClusterIPRange are the results
@@ -90,6 +91,8 @@ func NewServerRunOptions() *ServerRunOptions {
 			MasterCount:          1,
 		},
 	}
+	s.ServiceClusterIPRanges = kubeoptions.DefaultServiceIPCIDR.String()
+	s.ProxyCIDRAllowlist = kubeoptions.DefaultProxyCIDRAllowlist
 
 	s.Options.SystemNamespaces = append(s.Options.SystemNamespaces, v1.NamespaceNodeLease)
 
@@ -120,6 +123,12 @@ func (s *ServerRunOptions) Flags() (fss cliflag.NamedFlagSets) {
 	fs.StringVar(&s.ServiceClusterIPRanges, "service-cluster-ip-range", s.ServiceClusterIPRanges, ""+
 		"A CIDR notation IP range from which to assign service cluster IPs. This must not "+
 		"overlap with any IP ranges assigned to nodes or pods. Max of two dual-stack CIDRs is allowed.")
+
+	fs.Var(&s.ProxyCIDRAllowlist, "proxy-cidr-allowlist", ""+
+		"A comma-separated list of CIDR IP ranges which the API server can communicate with.")
+
+	fs.Var(&s.ProxyCIDRAllowlist, "proxy-cidr-whitelist", ""+
+		"Deprecated: Use '--proxy-cidr-allowlist' flag instead.")
 
 	fs.Var(&s.ServiceNodePortRange, "service-node-port-range", ""+
 		"A port range to reserve for services with NodePort visibility.  This must not overlap with the ephemeral port range on nodes.  "+

@@ -341,6 +341,26 @@ func (o *Options) completeServiceAccountOptions(ctx context.Context, completed *
 	}
 	completed.ServiceAccountTokenMaxExpiration = completed.Authentication.ServiceAccounts.MaxExpiration
 
+	if completed.Authentication.ServiceAccounts.KeyServiceURL != "" && len(completed.Authentication.ServiceAccounts.Issuers) != 0 {
+		if completed.Authentication.ServiceAccounts.MaxExpiration != 0 {
+			lowBound := time.Hour
+			upBound := time.Duration(1<<32) * time.Second
+			if completed.Authentication.ServiceAccounts.MaxExpiration < lowBound ||
+				completed.Authentication.ServiceAccounts.MaxExpiration > upBound {
+				return fmt.Errorf("the serviceaccount max expiration must be between 1 hour to 2^32 seconds")
+			}
+		}
+		var err error
+		completed.ServiceAccountTokenMaxExpiration = completed.Authentication.ServiceAccounts.MaxExpiration
+		completed.ServiceAccountIssuer, err = serviceaccount.ExternalJWTTokenGenerator(
+			completed.Authentication.ServiceAccounts.Issuers[0],
+			completed.Authentication.ServiceAccounts.KeyServiceURL,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to build external token generator: %v", err)
+		}
+	}
+
 	return nil
 }
 

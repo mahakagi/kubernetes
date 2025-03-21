@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "false"
+    "fargate.eks.amazonaws.com/admitMessage": "Pod not supported: data is of an unsupported volume Type, volumeDevices not supported"
+    "fargate.eks.amazonaws.com/runContainerValidation": "true"
+    "fargate.eks.amazonaws.com/containerAdmitMessage": "volumeDevices not supported"
+  name: volumedevice-pod
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  containers:
+  - image: alpine
+    name: alpine
+    volumeDevices:
+    - name: data
+      devicePath: /dev/xvda
+  volumes:
+    - name: data
+      awsElasticBlockStore:
+        volumeID: vol-abc123
+        fsType: ext4

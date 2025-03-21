@@ -29,6 +29,7 @@ import (
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
+	"github.com/pires/go-proxyproto"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
@@ -78,6 +79,10 @@ type SecureServingOptions struct {
 
 	// PermitAddressSharing controls if SO_REUSEADDR is used when binding the port.
 	PermitAddressSharing bool
+
+	// EnableProxyProtocol enables kube-apiserver to handle request with proxy protocol headers
+	// and get the clients' IP from it.
+	EnableProxyProtocol bool
 }
 
 type CertKey struct {
@@ -218,6 +223,10 @@ func (s *SecureServingOptions) AddFlags(fs *pflag.FlagSet) {
 		"If true, SO_REUSEADDR will be used when binding the port. This allows binding "+
 			"to wildcard IPs like 0.0.0.0 and specific IPs in parallel, and it avoids waiting "+
 			"for the kernel to release sockets in TIME_WAIT state. [default=false]")
+
+	fs.BoolVar(&s.EnableProxyProtocol, "enable-proxy-protocol", s.EnableProxyProtocol,
+		"If true, kube-apiserver can handle requests wit proxy protocol headers and get "+
+			"clients' IPs from it. [default=false]")
 }
 
 // ApplyTo fills up serving information in the server configuration.
@@ -256,6 +265,27 @@ func (s *SecureServingOptions) ApplyTo(config **server.SecureServingInfo) error 
 		}
 		s.BindPort = s.Listener.Addr().(*net.TCPAddr).Port
 		s.BindAddress = s.Listener.Addr().(*net.TCPAddr).IP
+	}
+
+	if s.EnableProxyProtocol {
+		ip, err := utilnet.ChooseBindAddressForInterface("eth0")
+		if err != nil {
+			return fmt.Errorf("failed to get eth0 ip %v", err)
+		}
+		klog.Infof("setting up proxy protocol to accept header on address %s", ip.String())
+		s.Listener = &proxyproto.Listener{
+			Listener: s.Listener,
+			ConnPolicy: func(connPolicyOptions proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+				localIP, _, err := net.SplitHostPort(connPolicyOptions.Downstream.String())
+				if err != nil {
+					return proxyproto.IGNORE, err
+				}
+				if localIP == ip.String() {
+					return proxyproto.USE, nil
+				}
+				return proxyproto.IGNORE, nil
+			},
+		}
 	}
 
 	*config = &server.SecureServingInfo{

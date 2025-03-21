@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
+	v1listers "k8s.io/client-go/listers/core/v1"
 )
 
 func TestDetermineNeededServiceUpdates(t *testing.T) {
@@ -327,6 +328,89 @@ func genSimpleSvc(namespace, name string) *v1.Service {
 			Name:      name,
 			Namespace: namespace,
 		},
+	}
+}
+
+func TestSvcPodsHaveMultiAZSpread(t *testing.T) {
+	fakeInformerFactory := informers.NewSharedInformerFactory(&fake.Clientset{}, 0*time.Second)
+	nodeLister := func(nodes []*v1.Node) v1listers.NodeLister {
+		for _, node := range nodes {
+			fakeInformerFactory.Core().V1().Nodes().Informer().GetStore().Add(node)
+		}
+		return fakeInformerFactory.Core().V1().Nodes().Lister()
+	}
+
+	node0 := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node0",
+			Labels: map[string]string{v1.LabelTopologyZone: "zone0"},
+		},
+		Spec: v1.NodeSpec{ProviderID: "aws:///zone0/i-abc"},
+	}
+
+	node1 := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node1",
+			Labels: map[string]string{v1.LabelTopologyZone: "zone1"},
+		},
+		Spec: v1.NodeSpec{ProviderID: "aws:///zone1/i-abc"},
+	}
+
+	node2 := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node2",
+			Labels: map[string]string{v1.LabelTopologyZone: "zone2"},
+		},
+		Spec: v1.NodeSpec{ProviderID: "aws:///zone2/i-abc"},
+	}
+
+	podsOnDiffNode := []*v1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-0"}, Spec: v1.PodSpec{NodeName: "node0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-1"}, Spec: v1.PodSpec{NodeName: "node1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-2"}, Spec: v1.PodSpec{NodeName: "node2"}},
+	}
+
+	podsOnSameNode := []*v1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-0"}, Spec: v1.PodSpec{NodeName: "node0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-1"}, Spec: v1.PodSpec{NodeName: "node0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-2"}, Spec: v1.PodSpec{NodeName: "node0"}},
+	}
+
+	podsOnRemovedNode := []*v1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-0"}, Spec: v1.PodSpec{NodeName: "node0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-1"}, Spec: v1.PodSpec{NodeName: "node5"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "test-pod-2"}, Spec: v1.PodSpec{NodeName: "node6"}},
+	}
+
+	testCases := []struct {
+		name     string
+		pods     []*v1.Pod
+		expected bool
+		nodes    []*v1.Node
+	}{
+		{
+			name:     "All pods on different nodes.",
+			pods:     podsOnDiffNode,
+			expected: true,
+			nodes:    []*v1.Node{node0, node1, node2},
+		},
+		{
+			name:     "All pods on the same node.",
+			pods:     podsOnSameNode,
+			expected: false,
+			nodes:    []*v1.Node{node0},
+		},
+		{
+			name:     "Some pods on a removed node and node get has error.",
+			pods:     podsOnRemovedNode,
+			expected: false,
+			nodes:    []*v1.Node{node0},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			azSpread := SvcPodsHaveMultiAZSpread(tc.pods, nodeLister(tc.nodes))
+			if azSpread != tc.expected {
+				t.Errorf("Expected azSpread to be %t, got %t", tc.expected, azSpread)
+			}
+		})
 	}
 }
 

@@ -45,6 +45,7 @@ import (
 	"k8s.io/kubernetes/pkg/controller/nodelifecycle/scheduler"
 	"k8s.io/kubernetes/pkg/controller/testutil"
 	controllerutil "k8s.io/kubernetes/pkg/controller/util/node"
+	constants "k8s.io/kubernetes/pkg/util/constants"
 	"k8s.io/kubernetes/pkg/util/node"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/kubernetes/test/utils/ktesting"
@@ -488,6 +489,237 @@ func TestMonitorNodeHealth(t *testing.T) {
 			},
 			expectedFollowingStates: map[string]ZoneState{
 				testutil.CreateZoneID("region1", "zone1"): statePartialDisruption,
+			},
+		},
+		"Full Zonal Disruption: All nodes in the zone are healthy, some nodes are tainted with SRB taints.": {
+			nodeList: []*v1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node0",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region1",
+							v1.LabelTopologyZone:            "zone1",
+							v1.LabelFailureDomainBetaRegion: "region1",
+							v1.LabelFailureDomainBetaZone:   "zone1",
+						},
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionTrue,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node1",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region1",
+							v1.LabelTopologyZone:            "zone1",
+							v1.LabelFailureDomainBetaRegion: "region1",
+							v1.LabelFailureDomainBetaZone:   "zone1",
+						},
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionTrue,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node2",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region1",
+							v1.LabelTopologyZone:            "zone1",
+							v1.LabelFailureDomainBetaRegion: "region1",
+							v1.LabelFailureDomainBetaZone:   "zone1",
+						},
+					},
+					Spec: v1.NodeSpec{
+						Taints: []v1.Taint{
+							{
+								Key:    constants.ImpairedZoneLabel,
+								Value:  "zone1",
+								Effect: "NoSchedule",
+							},
+						},
+						Unschedulable: true,
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionTrue,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+			},
+			updatedNodeStatuses: []v1.NodeStatus{
+				healthyNodeNewStatus,
+				healthyNodeNewStatus,
+				healthyNodeNewStatus,
+			},
+			expectedInitialStates: map[string]ZoneState{
+				testutil.CreateZoneID("region1", "zone1"): stateFullDisruption,
+			},
+			expectedFollowingStates: map[string]ZoneState{
+				testutil.CreateZoneID("region1", "zone1"): stateFullDisruption,
+			},
+		},
+		"Full Zonal Disruption: all the Nodes in one zone are down, we have nodes across zones. Only SRB zone is disrupted.": {
+			nodeList: []*v1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node0",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region1",
+							v1.LabelTopologyZone:            "zone1",
+							v1.LabelFailureDomainBetaRegion: "region1",
+							v1.LabelFailureDomainBetaZone:   "zone1",
+						},
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionTrue,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node1",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region1",
+							v1.LabelTopologyZone:            "zone2",
+							v1.LabelFailureDomainBetaRegion: "region1",
+							v1.LabelFailureDomainBetaZone:   "zone2",
+						},
+					},
+					Spec: v1.NodeSpec{
+						Taints: []v1.Taint{
+							{
+								Key:    constants.ImpairedZoneLabel,
+								Value:  "zone2",
+								Effect: "NoSchedule",
+							},
+						},
+						Unschedulable: true,
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionTrue,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+			},
+			updatedNodeStatuses: []v1.NodeStatus{
+				unhealthyNodeNewStatus,
+				healthyNodeNewStatus,
+			},
+			expectedInitialStates: map[string]ZoneState{
+				testutil.CreateZoneID("region1", "zone1"): stateInitial,
+				testutil.CreateZoneID("region1", "zone2"): stateFullDisruption,
+			},
+			expectedFollowingStates: map[string]ZoneState{
+				testutil.CreateZoneID("region1", "zone1"): stateInitial,
+				testutil.CreateZoneID("region1", "zone2"): stateFullDisruption,
+			},
+		},
+		"Full Zonal Disruption: all the Nodes in both the zones are down, SRB is pressed in zone2, only zone2 is in stateFullDisruption, we wont act on other zones/nodes.": {
+			nodeList: []*v1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node0",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region1",
+							v1.LabelTopologyZone:            "zone1",
+							v1.LabelFailureDomainBetaRegion: "region1",
+							v1.LabelFailureDomainBetaZone:   "zone1",
+						},
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionUnknown,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node1",
+						CreationTimestamp: fakeNow,
+						Labels: map[string]string{
+							v1.LabelTopologyRegion:          "region2",
+							v1.LabelTopologyZone:            "zone2",
+							v1.LabelFailureDomainBetaRegion: "region2",
+							v1.LabelFailureDomainBetaZone:   "zone2",
+						},
+					},
+					Spec: v1.NodeSpec{
+						Taints: []v1.Taint{
+							{
+								Key:    constants.ImpairedZoneLabel,
+								Value:  "zone2",
+								Effect: "NoSchedule",
+							},
+						},
+						Unschedulable: true,
+					},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{
+								Type:               v1.NodeReady,
+								Status:             v1.ConditionUnknown,
+								LastHeartbeatTime:  metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+								LastTransitionTime: metav1.Date(2015, 1, 1, 12, 0, 0, 0, time.UTC),
+							},
+						},
+					},
+				},
+			},
+			updatedNodeStatuses: []v1.NodeStatus{
+				unhealthyNodeNewStatus,
+				unhealthyNodeNewStatus,
+			},
+			expectedInitialStates: map[string]ZoneState{
+				testutil.CreateZoneID("region1", "zone1"): stateInitial,
+				testutil.CreateZoneID("region2", "zone2"): stateFullDisruption,
+			},
+			expectedFollowingStates: map[string]ZoneState{
+				testutil.CreateZoneID("region1", "zone1"): stateInitial,
+				testutil.CreateZoneID("region2", "zone2"): stateFullDisruption,
 			},
 		},
 		"Full Disruption: the zone has less than 2 Nodes down, the last healthy Node has failed": {

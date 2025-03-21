@@ -31,6 +31,18 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 )
 
+func validateProxyCIDRAllowlist(options CompletedOptions) []error {
+	errors := []error{}
+
+	// if its empty, don't add any IPs to the list
+	for _, cidr := range options.ProxyCIDRAllowlist {
+		if cidr.IP == nil {
+			errors = append(errors, fmt.Errorf("invalid --proxy-cidr-allowlist (or --proxy-cidr-whitelist) specified"))
+		}
+	}
+	return errors
+}
+
 // TODO: Longer term we should read this from some config store, rather than a flag.
 // validateClusterIPFlags is expected to be called after Complete()
 func validateClusterIPFlags(options Extra) []error {
@@ -138,6 +150,10 @@ func (s CompletedOptions) Validate() []error {
 
 	if s.MasterCount <= 0 {
 		errs = append(errs, fmt.Errorf("--apiserver-count should be a positive number, but value '%d' provided", s.MasterCount))
+	}
+
+	if es := validateProxyCIDRAllowlist(s); len(es) > 0 {
+		errs = append(errs, es...)
 	}
 
 	return errs

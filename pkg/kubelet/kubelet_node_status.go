@@ -473,6 +473,12 @@ func (kl *Kubelet) fastNodeStatusUpdate(ctx context.Context, timeout bool) (comp
 		return false
 	}
 
+	// Node may have Hostname, we need to wait until CCM sets InternalIP before marking the node as ready
+	if kl.waitForAddresses && !isNodeInternalIPSet(originalNode) {
+		klog.ErrorS(nil, "Node does not have internal IP address", "originalNode", originalNode)
+		return false
+	}
+
 	if originalNodeReady.Status == v1.ConditionTrue {
 		return true
 	}
@@ -805,6 +811,15 @@ func validateNodeIP(nodeIP net.IP) error {
 		}
 	}
 	return fmt.Errorf("node IP: %q not found in the host's network interfaces", nodeIP.String())
+}
+
+func isNodeInternalIPSet(node *v1.Node) bool {
+	for _, address := range node.Status.Addresses {
+		if address.Type == v1.NodeInternalIP && address.Address != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeStatusHasChanged compares the original node and current node's status and

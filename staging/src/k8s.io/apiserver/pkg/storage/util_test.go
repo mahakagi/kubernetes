@@ -31,6 +31,10 @@ import (
 	"k8s.io/apiserver/pkg/storage"
 )
 
+const (
+	defaultListEtcdMaxLimit = 500
+)
+
 var (
 	scheme = runtime.NewScheme()
 )

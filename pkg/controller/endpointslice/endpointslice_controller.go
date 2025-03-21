@@ -430,6 +430,7 @@ func (c *Controller) syncService(logger klog.Logger, key string) error {
 	if err != nil {
 		c.eventRecorder.Eventf(service, v1.EventTypeWarning, "FailedToUpdateEndpointSlices",
 			"Error updating Endpoint Slices for Service %s/%s: %v", service.Namespace, service.Name, err)
+		endpointslicemetrics.EpSliceReconciliationErrors.WithLabelValues(service.Name, service.Namespace).Inc()
 		return err
 	}
 

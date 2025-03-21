@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"k8s.io/apiserver/pkg/admission/plugin/webhook/generic/exclusionrules"
+	"sync"
 
 	"k8s.io/apiserver/pkg/cel/environment"
 	"k8s.io/apiserver/pkg/features"
@@ -45,6 +47,20 @@ import (
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 )
+
+var criticalPathExcluder exclusionrules.CriticalPathExcluder
+var LoadCriticalPathExcluder *sync.Once
+
+func init() {
+	// We are using a pointer to sync.Once in order to "reset" the sync.Once within our integration tests
+	// so that when the integration test api-server starts up, sync.Once has not been exhausted
+	// this is required because LoadCriticalPathExcluder is a global variable and when a suite of tests run
+	// the first test that starts an api-server will use up the sync.Once and subsequent launches of the api-server will
+	// not try to load the exclusion rules.
+	// see: test/integration/apiserver/admissionwebhook/webhook_exclusion_rules_test.go
+	// see: https://github.com/golang/go/issues/25955#issuecomment-398278056
+	LoadCriticalPathExcluder = new(sync.Once)
+}
 
 // Webhook is an abstract admission plugin with all the infrastructure to define Admit or Validate on-top.
 type Webhook struct {
@@ -94,6 +110,10 @@ func NewWebhook(handler *admission.Handler, configFile io.Reader, sourceFactory 
 	// Set defaults which may be overridden later.
 	cm.SetAuthenticationInfoResolver(authInfoResolver)
 	cm.SetServiceResolver(webhookutil.NewDefaultServiceResolver())
+
+	LoadCriticalPathExcluder.Do(func() {
+		criticalPathExcluder = exclusionrules.NewCriticalPathExcluder()
+	})
 
 	return &Webhook{
 		Handler:          handler,
@@ -165,6 +185,10 @@ func (a *Webhook) ShouldCallHook(ctx context.Context, h webhook.WebhookAccessor,
 	// Should not return an error here for webhooks which do not apply to the request, even if err is an unexpected scenario.
 	matches, matchObjErr := a.objectMatcher.MatchObjectSelector(h, attr)
 	if !matches && matchObjErr == nil {
+		return nil, nil
+	}
+
+	if criticalPathExcluder.ShouldSkipWebhookDueToExclusionRules(attr) {
 		return nil, nil
 	}
 

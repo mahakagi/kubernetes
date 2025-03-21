@@ -39,6 +39,9 @@ import (
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
+
+	// import grpc/health to enable transparent client side checking
+	_ "google.golang.org/grpc/health"
 	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -69,6 +72,17 @@ const (
 	dialTimeout = 20 * time.Second
 
 	dbMetricsMonitorJitter = 0.5
+
+	// grpcServiceConfigWithHealthcheck is used to enable etcd grpc client health check.
+	// See https://grpc.io/docs/guides/health-checking/#enabling-client-health-checking
+	//
+	// Need to specify loadBalancingPolicy because internally etcd sets `round_robin`.
+	// Using config without policy will revert to default `pick_first`
+	// https://grpc.io/docs/guides/custom-load-balancing/#implementing-your-own-policy
+	//
+	// serviceName is set to "" because etcd server uses empty string to represent the health of the whole server
+	// See https://grpc.io/docs/guides/health-checking/#the-server-side-health-service
+	grpcServiceConfigWithHealthcheck = `{"loadBalancingPolicy": "round_robin", "healthCheckConfig": {"serviceName": ""}}`
 )
 
 // TODO(negz): Stop using a package scoped logger. At the time of writing we're
@@ -108,6 +122,17 @@ func etcdClientDebugLevel() zapcore.Level {
 		return zapcore.InfoLevel
 	}
 	return l
+}
+
+func etcdClientEnableFastCount(c storagebackend.Config) storagebackend.Config {
+	envEnableFastCount := os.Getenv("ETCD_CLIENT_ENABLE_FAST_COUNT")
+
+	if envEnableFastCount == "true" {
+		c.EnableFastCount = true
+	} else if envEnableFastCount == "false" {
+		c.EnableFastCount = false
+	}
+	return c
 }
 
 func newETCD3HealthCheck(c storagebackend.Config, stopCh <-chan struct{}) (func() error, error) {
@@ -285,9 +310,10 @@ func (t *etcd3ProberMonitor) Monitor(ctx context.Context) (metrics.StorageMetric
 
 var newETCD3Client = func(c storagebackend.TransportConfig) (*kubernetes.Client, error) {
 	tlsInfo := transport.TLSInfo{
-		CertFile:      c.CertFile,
-		KeyFile:       c.KeyFile,
-		TrustedCAFile: c.TrustedCAFile,
+		CertFile:           c.CertFile,
+		KeyFile:            c.KeyFile,
+		TrustedCAFile:      c.TrustedCAFile,
+		InsecureSkipVerify: c.InsecureSkipVerify,
 	}
 	tlsConfig, err := tlsInfo.ClientConfig()
 	if err != nil {
@@ -295,7 +321,7 @@ var newETCD3Client = func(c storagebackend.TransportConfig) (*kubernetes.Client,
 	}
 	// NOTE: Client relies on nil tlsConfig
 	// for non-secure connections, update the implicit variable
-	if len(c.CertFile) == 0 && len(c.KeyFile) == 0 && len(c.TrustedCAFile) == 0 {
+	if len(c.CertFile) == 0 && len(c.KeyFile) == 0 && len(c.TrustedCAFile) == 0 && !c.InsecureSkipVerify {
 		tlsConfig = nil
 	}
 	networkContext := egressselector.Etcd.AsNetworkContext()
@@ -342,8 +368,14 @@ var newETCD3Client = func(c storagebackend.TransportConfig) (*kubernetes.Client,
 		}
 		dialOptions = append(dialOptions, grpc.WithContextDialer(dialer))
 	}
+	if c.EnableGrpcHealthcheck {
+		// ignore config set by etcd manual resolver inside etcd client
+		dialOptions = append(dialOptions, grpc.WithDisableServiceConfig())
+		dialOptions = append(dialOptions, grpc.WithDefaultServiceConfig(grpcServiceConfigWithHealthcheck))
+	}
 
 	cfg := clientv3.Config{
+		AutoSyncInterval:     c.AutoSyncInterval,
 		DialTimeout:          dialTimeout,
 		DialKeepAliveTime:    keepaliveTime,
 		DialKeepAliveTimeout: keepaliveTimeout,
@@ -464,7 +496,10 @@ func newETCD3Storage(c storagebackend.ConfigForResource, newFunc, newListFunc fu
 
 	versioner := storage.APIObjectVersioner{}
 	decoder := etcd3.NewDefaultDecoder(c.Codec, versioner)
-	store := etcd3.New(client, c.Codec, newFunc, newListFunc, c.Prefix, resourcePrefix, c.GroupResource, transformer, c.LeaseManagerConfig, decoder, versioner)
+	pagingConfig := etcd3.PagingConfig{MaximumPageSize: c.MaximumPageSize}
+	// check to see if ENABLE_FAST_COUNT variable is set, if so it takes precendence over what is passed in manifest file
+	c.Config = etcdClientEnableFastCount(c.Config)
+	store := etcd3.New(client, c.Codec, newFunc, newListFunc, c.Prefix, resourcePrefix, c.GroupResource, transformer, pagingConfig, c.LeaseManagerConfig, decoder, versioner, c.EnableFastCount)
 	return store, destroyFunc, nil
 }
 

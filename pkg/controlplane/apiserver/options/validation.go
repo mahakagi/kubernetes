@@ -104,6 +104,35 @@ func validateUnknownVersionInteroperabilityProxyFlags(options *Options) []error 
 	return err
 }
 
+func validateExternalKeyServer(options *Options) []error {
+	var errs []error
+
+	enableAttempted := options.Authentication.ServiceAccounts.KeyServiceURL != ""
+	requiredTokenFlagsSet := len(options.Authentication.ServiceAccounts.Issuers) != 0
+
+	if enableAttempted && !utilfeature.DefaultFeatureGate.Enabled(features.ExternalKeyService) {
+		errs = append(errs, errors.New("the ExternalKeyService feature is not enabled but --key-service-url flag was passed"))
+	}
+
+	// TODO: @micahhausler validate url format of --key-service-url
+
+	if enableAttempted && !requiredTokenFlagsSet {
+		errs = append(errs, errors.New("the --key-service-url flag requires --service-account-issuer"))
+	}
+	return errs
+}
+
+func validateAPIServerIdentity(options *Options) []error {
+	var errs []error
+	if utilfeature.DefaultFeatureGate.Enabled(features.ExternalKeyService) {
+		errs = append(errs, validateExternalKeyServer(options)...)
+	} else {
+		errs = append(errs, validateTokenRequest(options)...)
+	}
+
+	return errs
+}
+
 var pathOrSocket = regexp.MustCompile(`(^(/[^/ ]*)+/?$)|(^@([a-zA-Z0-9_-]+\.)*[a-zA-Z0-9_-]+$)`)
 
 func validateServiceAccountTokenSigningConfig(options *Options) []error {
@@ -146,6 +175,7 @@ func (s *Options) Validate() []error {
 	errs = append(errs, validateUnknownVersionInteroperabilityProxyFlags(s)...)
 	errs = append(errs, validateNodeSelectorAuthorizationFeature()...)
 	errs = append(errs, validateServiceAccountTokenSigningConfig(s)...)
+	errs = append(errs, validateAPIServerIdentity(s)...)
 
 	return errs
 }

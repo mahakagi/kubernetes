@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "false"
+    "fargate.eks.amazonaws.com/admitMessage": "Pod not supported: invalid-vol not supported because: PVC invalid-pvc not bound"
+  name: ebs-volume-pod
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  containers:
+    - image: nginx:alpine
+      name: nginx
+      volumeMounts:
+        - mountPath: /mnt/ebs
+          name: ebs-vol
+          readOnly: false
+  volumes:
+    - name: invalid-vol
+      persistentVolumeClaim:
+        claimName: invalid-pvc

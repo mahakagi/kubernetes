@@ -44,6 +44,7 @@ import (
 	"k8s.io/kubernetes/plugin/pkg/admission/network/denyserviceexternalips"
 	"k8s.io/kubernetes/plugin/pkg/admission/noderestriction"
 	"k8s.io/kubernetes/plugin/pkg/admission/nodetaint"
+	"k8s.io/kubernetes/plugin/pkg/admission/objectcount"
 	"k8s.io/kubernetes/plugin/pkg/admission/podnodeselector"
 	"k8s.io/kubernetes/plugin/pkg/admission/podtolerationrestriction"
 	podpriority "k8s.io/kubernetes/plugin/pkg/admission/priority"
@@ -93,6 +94,7 @@ var AllOrderedPlugins = []string{
 	certsubjectrestriction.PluginName,       // CertificateSubjectRestriction
 	defaultingressclass.PluginName,          // DefaultIngressClass
 	denyserviceexternalips.PluginName,       // DenyServiceExternalIPs
+	objectcount.PluginName,                  // ObjectCount
 
 	// new admission plugins should generally be inserted above here
 	// webhook, resourcequota, and deny plugins must go at the end
@@ -138,6 +140,7 @@ func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
 	certsigning.Register(plugins)
 	ctbattest.Register(plugins)
 	certsubjectrestriction.Register(plugins)
+	objectcount.Register(plugins)
 }
 
 // DefaultOffAdmissionPlugins get admission plugins off by default for kube-apiserver.

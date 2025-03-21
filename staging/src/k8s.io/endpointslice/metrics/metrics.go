@@ -131,6 +131,40 @@ var (
 		},
 		[]string{"traffic_distribution"}, // A trafficDistribution value
 	)
+
+	// Metric to track the number of endpoints removed per service when the 'zone' label is added
+	EpSliceEndpointsRemovedByZoneLabel = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Name: "epslice_endpoints_removed_by_zone_label",
+			Help: "Number of endpoints removed by epslice controller when srb label is added to a service.",
+		},
+		[]string{"service_name", "namespace", "zone"},
+	)
+
+	EpSliceReconciliationErrors = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Name: "endpointslice_reconciliation_errors_total",
+			Help: "Total number of errors encountered during endpointslice reconciliation.",
+		},
+		[]string{"service_name", "namespace"},
+	)
+
+	// Metric to track the number of endpoints removed per service when the 'zone' label is added
+	EpEndpointsRemovedByZoneLabel = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Name: "ep_endpoints_removed_by_zone_label",
+			Help: "Number of endpoints removed by ep controller when srb label is added to a service.",
+		},
+		[]string{"service_name", "namespace", "zone"},
+	)
+
+	EpReconciliationErrors = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Name: "endpoint_reconciliation_errors_total",
+			Help: "Total number of errors encountered during endpoint reconciliation.",
+		},
+		[]string{"service_name", "namespace"},
+	)
 )
 
 var registerMetrics sync.Once
@@ -147,5 +181,10 @@ func RegisterMetrics() {
 		legacyregistry.MustRegister(EndpointSlicesChangedPerSync)
 		legacyregistry.MustRegister(EndpointSliceSyncs)
 		legacyregistry.MustRegister(ServicesCountByTrafficDistribution)
+		legacyregistry.MustRegister(EpSliceEndpointsRemovedByZoneLabel)
+		legacyregistry.MustRegister(EpSliceReconciliationErrors)
+		legacyregistry.MustRegister(EpEndpointsRemovedByZoneLabel)
+		legacyregistry.MustRegister(EpReconciliationErrors)
+
 	})
 }

@@ -3317,6 +3317,7 @@ func TestNewMainKubeletStandAlone(t *testing.T) {
 		map[string]string{},
 		1024,
 		false,
+        false,
 	)
 	assert.NoError(t, err, "NewMainKubelet should succeed")
 	assert.NotNil(t, testMainKubelet, "testMainKubelet should not be nil")
@@ -3424,6 +3425,7 @@ func TestSyncPodSpans(t *testing.T) {
 		*kubeCfg.MemoryThrottlingFactor,
 		kubeletutil.NewPodStartupLatencyTracker(),
 		tp,
+		nil,
 	)
 	assert.NoError(t, err)
 

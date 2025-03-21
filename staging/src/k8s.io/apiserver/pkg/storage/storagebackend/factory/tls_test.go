@@ -92,6 +92,43 @@ func TestTLSConnection(t *testing.T) {
 	}
 }
 
+func TestSkipVerifySelfSignedEtcdServer(t *testing.T) {
+	codec := apitesting.TestCodec(codecs, examplev1.SchemeGroupVersion)
+
+	// override server config to enable client auto TLS
+	etcdConfig := testserver.NewTestConfig(t)
+	etcdConfig.ClientAutoTLS = true
+	etcdConfig.ClientTLSInfo = transport.TLSInfo{InsecureSkipVerify: true}
+	etcdConfig.SelfSignedCertValidity = 1
+	etcdConfig.TlsMinVersion = "TLS1.3"
+	for i := range etcdConfig.ListenClientUrls {
+		etcdConfig.ListenClientUrls[i].Scheme = "https"
+	}
+	for i := range etcdConfig.AdvertiseClientUrls {
+		etcdConfig.AdvertiseClientUrls[i].Scheme = "https"
+	}
+
+	client := testserver.RunEtcd(t, etcdConfig)
+	cfg := storagebackend.Config{
+		Type: storagebackend.StorageTypeETCD3,
+		Transport: storagebackend.TransportConfig{
+			InsecureSkipVerify: true,
+			ServerList:         client.Endpoints(),
+			TracerProvider:     noopoteltrace.NewTracerProvider(),
+		},
+		Codec: codec,
+	}
+	storage, destroyFunc, err := newETCD3Storage(*cfg.ForResource(schema.GroupResource{Resource: "pods"}), nil, nil, "")
+	defer destroyFunc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = storage.Create(context.TODO(), "/abc", &example.Pod{}, nil, 0)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+}
+
 func configureTLSCerts(t *testing.T) (certFile, keyFile, caFile string) {
 	baseDir := os.TempDir()
 	tempDir, err := ioutil.TempDir(baseDir, "etcd_certificates")

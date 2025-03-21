@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "true"
+  name: valid-volumes
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  containers:
+  - image: nginx:alpine
+    name: nginx
+    volumeMounts:
+    - mountPath: /mnt/scratch
+      name: scratch-vol
+    - mountPath: /mnt/secret
+      name: secret-vol
+    - mountPath: /mnt/config
+      name: config-vol
+    - mountPath: /mnt/projected
+      name: projected-vol
+    - mountPath: /mnt/downward
+      name: downward-vol
+    - mountPath: /mnt/nfs
+      name: nfs-vol
+  volumes:
+  - name: scratch-vol
+    emptyDir: {}
+  - name: secret-vol
+    secret:
+      secretName: my-secret
+  - name: config-vol
+    configMap:
+      name: my-config-map
+  - name: projected-vol
+    projected:
+      sources:
+      - secret:
+          name: my-secret
+          items:
+            - key: username
+              path: my-group/my-username
+      - downwardAPI:
+          items:
+            - path: "labels"
+              fieldRef:
+                fieldPath: metadata.labels
+            - path: "cpu_limit"
+              resourceFieldRef:
+                containerName: container-test
+                resource: limits.cpu
+      - configMap:
+          name: myconfigmap
+          items:
+            - key: config
+              path: my-group/my-config
+  - name: downward-vol
+    downwardAPI:
+      items:
+        - path: "labels"
+          fieldRef:
+            fieldPath: metadata.labels
+        - path: "annotations"
+          fieldRef:
+            fieldPath: metadata.annotations
+  - name: nfs-vol
+    nfs:
+      server: "fs-12345678.efs.us-west-2.amazonaws.com"
+      path: "/"
+  - name: efs-vol
+    persistentVolumeClaim:
+      claimName: efs-pvc

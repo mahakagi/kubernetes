@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    "fargate.eks.amazonaws.com/admit": "false"
+    "fargate.eks.amazonaws.com/admitMessage": "Pod not supported: DaemonSet not supported"
+  name: init-security-context
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+  ownerReferences:
+    - apiVersion: apps/v1
+      blockOwnerDeletion: true
+      controller: true
+      kind: DaemonSet
+      name: aws-node
+      uid: efc50262-f057-11e9-8dda-0a7cbbe5199a
+spec:
+  schedulerName: fargate-scheduler
+  initContainers:
+    - image: nginx:alpine
+      name: nginx
+  containers:
+    - image: nginx:alpine
+      name: nginx
+      volumeMounts:
+        - mountPath: /mnt/scratch
+          name: scratch
+  volumes:
+    - name: scratch
+      emptyDir: {}

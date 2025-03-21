@@ -39,6 +39,10 @@ import (
 	"k8s.io/apiserver/pkg/storage/value/encrypt/identity"
 )
 
+const (
+	defaultListEtcdMaxLimit = 500
+)
+
 var (
 	scheme   = runtime.NewScheme()
 	codecs   = serializer.NewCodecFactory(scheme)
@@ -59,6 +63,7 @@ func newEtcdTestStorage(t testing.TB, prefix string) (*etcd3testing.EtcdTestServ
 	server, _ := etcd3testing.NewUnsecuredEtcd3TestClientServer(t)
 	versioner := storage.APIObjectVersioner{}
 	codec := apitesting.TestCodec(codecs, examplev1.SchemeGroupVersion)
+	pagingConfig := etcd3.PagingConfig{MaximumPageSize: defaultListEtcdMaxLimit}
 	storage := etcd3.New(
 		server.V3Client,
 		codec,
@@ -68,9 +73,11 @@ func newEtcdTestStorage(t testing.TB, prefix string) (*etcd3testing.EtcdTestServ
 		"/pods",
 		schema.GroupResource{Resource: "pods"},
 		identity.NewEncryptCheckTransformer(),
+		pagingConfig,
 		etcd3.NewDefaultLeaseManagerConfig(),
 		etcd3.NewDefaultDecoder(codec, versioner),
-		versioner)
+		versioner,
+		true)
 	return server, storage
 }
 

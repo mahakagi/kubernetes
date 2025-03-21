@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    # This pod template is used to test advanced linux caps are allowed when ADVANCED_LINUX_CAPS is enabled
+    "fargate.eks.amazonaws.com/admit": "false"
+    "fargate.eks.amazonaws.com/advancedLinuxCaps": "true"
+    "fargate.eks.amazonaws.com/blockedAdvancedLinuxCaps": "SYS_PTRACE,SYS_RESOURCE"
+    "fargate.eks.amazonaws.com/admitMessage": "Pod not supported: invalid SecurityContext fields: Capabilities added: SYS_PTRACE, SYS_RESOURCE"
+  name: valid-security-context
+  namespace: eks-fargate-namespace
+  labels:
+    "eks.amazonaws.com/fargate-profile": "my-profile"
+spec:
+  schedulerName: fargate-scheduler
+  containers:
+    - image: nginx:alpine
+      name: nginx
+      securityContext:
+        capabilities:
+          add:
+            # All ambient capabilities
+            - "AUDIT_WRITE"
+            - "CHOWN"
+            - "DAC_OVERRIDE"
+            - "FOWNER"
+            - "FSETID"
+            - "KILL"
+            - "MKNOD"
+            - "NET_BIND_SERVICE"
+            - "NET_RAW"
+            - "SETFCAP"
+            - "SETGID"
+            - "SETPCAP"
+            - "SETUID"
+            - "SYS_CHROOT"
+            # Advanced linux capabilities
+            - "IPC_LOCK"
+            - "LINUX_IMMUTABLE"
+            - "SYS_PTRACE"
+            - "SYS_RESOURCE"

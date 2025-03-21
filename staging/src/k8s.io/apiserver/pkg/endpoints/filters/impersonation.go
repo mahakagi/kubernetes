@@ -103,6 +103,11 @@ func WithImpersonation(handler http.Handler, a authorizer.Authorizer, s runtime.
 				actingAsAttributes.Resource = "userextras"
 				actingAsAttributes.Subresource = extraKey
 				userExtra[extraKey] = append(userExtra[extraKey], extraValue)
+				if strings.HasPrefix(extraKey, "sigs.k8s.io/aws-iam-authenticator") {
+					klog.V(4).InfoS("UserInfo extra keys cannot use reserved namespace sigs.k8s.io/aws-iam-authenticator")
+					responsewriters.Forbidden(ctx, actingAsAttributes, w, req, "UserInfo extra keys cannot use reserved namespace sigs.k8s.io/aws-iam-authenticator", s)
+					return
+				}
 
 			case authenticationv1.SchemeGroupVersion.WithKind("UID").GroupKind():
 				uid = string(impersonationRequest.Name)

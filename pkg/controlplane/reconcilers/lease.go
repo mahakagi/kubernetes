@@ -24,6 +24,7 @@ https://github.com/openshift/origin/blob/bb340c5dd5ff72718be86fb194dedc0faed7f4c
 import (
 	"fmt"
 	"net"
+	"os"
 	"path"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,7 @@ import (
 	"k8s.io/apiserver/pkg/storage/storagebackend"
 	storagefactory "k8s.io/apiserver/pkg/storage/storagebackend/factory"
 	endpointsv1 "k8s.io/kubernetes/pkg/api/v1/endpoints"
+	az "k8s.io/kubernetes/pkg/kubeapiserver/az"
 )
 
 // Leases is an interface which assists in managing the set of active masters
@@ -179,6 +181,11 @@ func (r *leaseEndpointReconciler) ReconcileEndpoints(serviceName string, ip net.
 	r.reconcilingLock.Lock()
 	defer r.reconcilingLock.Unlock()
 
+	e, errGetEndpoints := r.epAdapter.Get(corev1.NamespaceDefault, serviceName, metav1.GetOptions{})
+	if errGetEndpoints == nil && r.shouldStopEndpointReconciliation(e, ip) {
+		return nil
+	}
+
 	// Refresh the TTL on our key, independently of whether any error or
 	// update conflict happens below. This makes sure that at least some of
 	// the masters will add our endpoint.
@@ -186,13 +193,14 @@ func (r *leaseEndpointReconciler) ReconcileEndpoints(serviceName string, ip net.
 		return err
 	}
 
-	return r.doReconcile(serviceName, endpointPorts, reconcilePorts)
+	return r.doReconcile(e, errGetEndpoints, serviceName, endpointPorts, reconcilePorts)
 }
 
-// doReconcile can be called from ReconcileEndpoints() or RemoveEndpoints().
-// it is NOT SAFE to call it from multiple goroutines.
-func (r *leaseEndpointReconciler) doReconcile(serviceName string, endpointPorts []corev1.EndpointPort, reconcilePorts bool) error {
-	e, err := r.epAdapter.Get(corev1.NamespaceDefault, serviceName, metav1.GetOptions{})
+// doReconcile is called from ReconcileEndpoints and RemoveEndpoints. The requirement is that the caller has taken care of updating the etcd lease ttl before callig.
+// In the code flow of RemoveEndpoint, doReconcile creates the endpoint anyway if it does not exist. We don't want to change the logic. However this logic requires doReconcile
+// to handle IsNotFound error from multiple code paths. Hence the err object is passed as a parameter. It is not a conventional code pattern and we recognize that.
+// We tradeoff in favor of keeping the patch succinct and not handling right code semantic.
+func (r *leaseEndpointReconciler) doReconcile(e *corev1.Endpoints, err error, serviceName string, endpointPorts []corev1.EndpointPort, reconcilePorts bool) error {
 	shouldCreate := false
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -335,7 +343,8 @@ func (r *leaseEndpointReconciler) RemoveEndpoints(serviceName string, ip net.IP,
 		return err
 	}
 
-	return r.doReconcile(serviceName, endpointPorts, true)
+	e, err := r.epAdapter.Get(corev1.NamespaceDefault, serviceName, metav1.GetOptions{})
+	return r.doReconcile(e, err, serviceName, endpointPorts, true)
 }
 
 func (r *leaseEndpointReconciler) StopReconciling() {
@@ -344,4 +353,37 @@ func (r *leaseEndpointReconciler) StopReconciling() {
 
 func (r *leaseEndpointReconciler) Destroy() {
 	r.masterLeases.Destroy()
+}
+
+func (r *leaseEndpointReconciler) shouldStopEndpointReconciliation(e *corev1.Endpoints, ip net.IP) bool {
+	if ip.IsLoopback() {
+		klog.V(3).Info("Skipping endpoint reconciler due to loopback address.")
+		return true
+	}
+
+	// the second parameters are excluded from check because we expect the strings to be non empty for the logic.
+	// found vs not found will yield the same results for the string
+	excludedZone, _ := e.GetLabels()[az.ZoneEvacuationLabelKey]
+	zoneEvacuationExpiry, _ := e.GetLabels()[az.ZoneEvacuationExpiryLabelKey]
+	currentZone, _ := os.LookupEnv(az.CurrentZoneEnvironmentKey)
+
+	if excludedZone != "" && currentZone != "" && az.IsEpochCurrent(zoneEvacuationExpiry) && excludedZone == currentZone {
+		if masterIPs, err := r.masterLeases.ListLeases(); err == nil {
+			if len(masterIPs) >= 2 {
+				// Exit only if another apiserver is updating the endpoints.
+				// This condition is hit when the label is first applied. The apiserver in impacted zone will see 2 master ips until etcd lease ttl expires
+				// If the current apiserver is the only one updating, then we don't want to exit
+				klog.Warningf("Exiting master advertise address reconciliation because %s zone is impacted and at least 2 endpoints are available: %v", excludedZone, masterIPs)
+				return true
+			} else if len(masterIPs) == 1 && !net.ParseIP(masterIPs[0]).Equal(ip) {
+				// This condition is hit when there is only one master ip. If the one master ip is of a different apiserver, it is safe to exit.
+				// If the only existing master ip is self ip, then we don't want to exit and cause availability drop. This helps in fail open when cascading errors happen
+				// and the remaining healthy apiserver terminates.
+				klog.Warningf("Exiting master advertise address reconciliation because %s zone is impacted and a different apiserver instance is available %v.", excludedZone, masterIPs)
+				return true
+			}
+			// if no endpoints exist or the self ip is the only ip, let the reconciliation go through(fail open)
+		}
+	}
+	return false
 }

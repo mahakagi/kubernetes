@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/klog/v2"
 )
 
 // Feature is the name of each feature in storage that we check in feature_support_checker.
@@ -331,14 +332,16 @@ type DeleteOptions struct {
 	IgnoreStoreReadError bool
 }
 
-func ValidateListOptions(keyPrefix string, versioner Versioner, opts ListOptions) (withRev int64, continueKey string, err error) {
+func ValidateListOptions(keyPrefix string, versioner Versioner, opts ListOptions) (withRev int64, continueKey string, remainingCount int64, err error) {
 	if opts.Recursive && len(opts.Predicate.Continue) > 0 {
-		continueKey, continueRV, err := DecodeContinue(opts.Predicate.Continue, keyPrefix)
+		continueKey, continueRV, remainingCount, err := DecodeContinue(opts.Predicate.Continue, keyPrefix)
 		if err != nil {
-			return 0, "", apierrors.NewBadRequest(fmt.Sprintf("invalid continue token: %v", err))
+			return 0, "", remainingCount, apierrors.NewBadRequest(fmt.Sprintf("invalid continue token: %v", err))
 		}
+		klog.V(8).Infof("Continue token extracted. Revision: %d, RemainingCount: %d", continueRV, remainingCount)
+
 		if len(opts.ResourceVersion) > 0 && opts.ResourceVersion != "0" {
-			return 0, "", apierrors.NewBadRequest("specifying resource version is not allowed when using continue")
+			return 0, "", remainingCount, apierrors.NewBadRequest("specifying resource version is not allowed when using continue")
 		}
 		// If continueRV > 0, the LIST request needs a specific resource version.
 		// continueRV==0 is invalid.
@@ -346,14 +349,14 @@ func ValidateListOptions(keyPrefix string, versioner Versioner, opts ListOptions
 		if continueRV > 0 {
 			withRev = continueRV
 		}
-		return withRev, continueKey, nil
+		return withRev, continueKey, remainingCount, nil
 	}
 	if len(opts.ResourceVersion) == 0 {
-		return withRev, "", nil
+		return withRev, "", remainingCount, nil
 	}
 	parsedRV, err := versioner.ParseResourceVersion(opts.ResourceVersion)
 	if err != nil {
-		return withRev, "", apierrors.NewBadRequest(fmt.Sprintf("invalid resource version: %v", err))
+		return withRev, "", remainingCount, apierrors.NewBadRequest(fmt.Sprintf("invalid resource version: %v", err))
 	}
 	switch opts.ResourceVersionMatch {
 	case metav1.ResourceVersionMatchNotOlderThan:
@@ -366,7 +369,7 @@ func ValidateListOptions(keyPrefix string, versioner Versioner, opts ListOptions
 			withRev = int64(parsedRV)
 		}
 	default:
-		return withRev, "", fmt.Errorf("unknown ResourceVersionMatch value: %v", opts.ResourceVersionMatch)
+		return withRev, "", remainingCount, fmt.Errorf("unknown ResourceVersionMatch value: %v", opts.ResourceVersionMatch)
 	}
-	return withRev, "", nil
+	return withRev, "", remainingCount, nil
 }

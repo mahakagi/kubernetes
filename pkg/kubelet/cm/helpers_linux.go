@@ -32,7 +32,8 @@ import (
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	kubefeatures "k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/kubelet/cm/util"
+	cmutil "k8s.io/kubernetes/pkg/kubelet/cm/util"
+	util "k8s.io/kubernetes/pkg/kubelet/util"
 )
 
 const (
@@ -174,6 +175,7 @@ func ResourceConfigForPod(allocatedPod *v1.Pod, enforceCPULimits bool, cpuPeriod
 	// convert to CFS values
 	cpuShares := MilliCPUToShares(cpuRequests)
 	cpuQuota := MilliCPUToQuota(cpuLimits, int64(cpuPeriod))
+	cpuQuota = util.GetPodMaxCpuQuota(cpuQuota)
 
 	// quota is not capped when cfs quota is disabled
 	if !enforceCPULimits {
@@ -260,10 +262,10 @@ func getCgroupSubsystemsV2() (*CgroupSubsystems, error) {
 	mounts := []libcontainercgroups.Mount{}
 	mountPoints := make(map[string]string, len(controllers))
 	for _, controller := range controllers {
-		mountPoints[controller] = util.CgroupRoot
+		mountPoints[controller] = cmutil.CgroupRoot
 		m := libcontainercgroups.Mount{
-			Mountpoint: util.CgroupRoot,
-			Root:       util.CgroupRoot,
+			Mountpoint: cmutil.CgroupRoot,
+			Root:       cmutil.CgroupRoot,
 			Subsystems: []string{controller},
 		}
 		mounts = append(mounts, m)

@@ -19,8 +19,10 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -140,6 +142,19 @@ func NewDaemonSetsController(
 ) (*DaemonSetsController, error) {
 	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	logger := klog.FromContext(ctx)
+	burstReplicas := BurstReplicas
+	burstReplicasOverrideStr := os.Getenv("DAEMONSET_CONTROLLER_BURST_REPLICAS")
+	if burstReplicasOverrideStr != "" {
+		burstReplicasOverride, err := strconv.Atoi(burstReplicasOverrideStr)
+		if err != nil {
+			return nil, fmt.Errorf("malformed burstReplicas override: '%s': %v", burstReplicasOverrideStr, err)
+		}
+		if burstReplicasOverride <= 0 {
+			return nil, fmt.Errorf("burstReplicas override must be greater than zero: %d", burstReplicasOverride)
+		}
+		burstReplicas = burstReplicasOverride
+	}
+	logger.V(2).Info("Using config", "burstReplicas", burstReplicas)
 	dsc := &DaemonSetsController{
 		kubeClient:       kubeClient,
 		eventBroadcaster: eventBroadcaster,
@@ -151,7 +166,7 @@ func NewDaemonSetsController(
 		crControl: controller.RealControllerRevisionControl{
 			KubeClient: kubeClient,
 		},
-		burstReplicas: BurstReplicas,
+		burstReplicas: burstReplicas,
 		expectations:  controller.NewControllerExpectations(),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),

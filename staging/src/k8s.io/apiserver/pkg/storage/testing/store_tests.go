@@ -44,6 +44,150 @@ import (
 
 type KeyValidation func(ctx context.Context, t *testing.T, key string)
 
+func RunTestListPaginationWithEnforcedLimit(ctx context.Context, t *testing.T, store storage.Interface, validation CallsValidation) {
+	// write pods
+	podCount := 2000
+	var pods []*example.Pod
+	for i := 0; i < podCount; i++ {
+		obj := &example.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%04d", i)}}
+		key := computePodKey(obj)
+		storedObj := &example.Pod{}
+		err := store.Create(ctx, key, obj, storedObj, 0)
+		if err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+		pods = append(pods, storedObj)
+	}
+
+	// user list requests with 100 limit + latest resource version
+	options := storage.ListOptions{
+		ResourceVersion: "0",
+		Predicate: storage.SelectionPredicate{
+			Label: labels.Everything(),
+			GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+				pod := obj.(*example.Pod)
+				return nil, fields.Set{"metadata.name": pod.Name}, nil
+			},
+		},
+		Recursive: true,
+	}
+
+	testCases := []struct {
+		// are we selecting everything or one item?
+		setFieldSelector bool
+		// predicate setLimit
+		setLimit int64
+		// expected number of total items from GetList
+		expectItems int
+		// expected number of transformer reads
+		expectTransformerReads uint64
+		// expected number of calls to etcd
+		expectPages uint64
+		// expected continuation token in GetList response
+		expectContinue bool
+	}{
+		{
+			setFieldSelector:       false,
+			setLimit:               0, // no limit is set, we want all items
+			expectItems:            2000,
+			expectTransformerReads: 2000,
+			expectPages:            4,
+			expectContinue:         false,
+		},
+		{
+			setFieldSelector:       false,
+			setLimit:               50, // limit < maxLimit
+			expectItems:            50,
+			expectTransformerReads: 50,
+			expectPages:            1,
+			expectContinue:         true,
+		},
+		{
+			setFieldSelector:       false,
+			setLimit:               500, // limit = maxLimit
+			expectItems:            500,
+			expectTransformerReads: 500,
+			expectPages:            1,
+			expectContinue:         true,
+		},
+		{
+			setFieldSelector:       false,
+			setLimit:               1000, // limit > maxLimit
+			expectItems:            1000,
+			expectTransformerReads: 1000,
+			expectPages:            2,
+			expectContinue:         true,
+		},
+		{
+			setFieldSelector:       true,
+			setLimit:               0,
+			expectItems:            1,
+			expectTransformerReads: 2000,
+			expectPages:            1,
+			expectContinue:         false,
+		},
+		{
+			setFieldSelector:       true,
+			setLimit:               1,
+			expectItems:            1,
+			expectTransformerReads: 1000,
+			expectPages:            10,
+			expectContinue:         true,
+		},
+		{
+			setFieldSelector:       true,
+			setLimit:               50,
+			expectItems:            1,
+			expectTransformerReads: 2000,
+			expectPages:            7,
+			expectContinue:         false,
+		},
+		{
+			setFieldSelector:       true,
+			setLimit:               500,
+			expectItems:            1,
+			expectTransformerReads: 2000,
+			expectPages:            4,
+			expectContinue:         false,
+		},
+		{
+			setFieldSelector:       true,
+			setLimit:               1000,
+			expectItems:            1,
+			expectTransformerReads: 2000,
+			expectPages:            4,
+			expectContinue:         false,
+		},
+	}
+	for i, tc := range testCases {
+		t.Logf("--- Running test case #%d:\n\tsetFieldSelector: %v\n\tsetLimit: %d\n\texpectItems: %d\n\texpectTransformerReads: %d\n\texpectPages: %d\n\texpectContinue: %v", i, tc.setFieldSelector, tc.setLimit, tc.expectItems, tc.expectTransformerReads, tc.expectPages, tc.expectContinue)
+
+		options.Predicate.Limit = tc.setLimit
+		if tc.setFieldSelector {
+			options.Predicate.Field = fields.OneTermEqualSelector("metadata.name", "pod-0999")
+		} else {
+			options.Predicate.Field = fields.Everything()
+		}
+
+		out := &example.PodList{}
+		if err := store.GetList(ctx, "/pods", options, out); err != nil {
+			t.Fatalf("Unable to get initial list: %v", err)
+		}
+		if tc.expectContinue != (len(out.Continue) != 0) {
+			t.Errorf("Unexpected continuation token")
+		}
+		if len(out.Items) != tc.expectItems {
+			t.Fatalf("expect %d items, but got %d", tc.expectItems, len(out.Items))
+		}
+		if tc.setFieldSelector {
+			if !reflect.DeepEqual(&out.Items[0], pods[999]) {
+				t.Fatalf("Unexpected first page: %#v", out.Items)
+			}
+		}
+		validation(t, uint64(tc.setLimit), tc.expectTransformerReads)
+	}
+}
+
 func RunTestCreate(ctx context.Context, t *testing.T, store storage.Interface, validation KeyValidation) {
 	tests := []struct {
 		name          string
@@ -639,7 +783,11 @@ func RunTestList(ctx context.Context, t *testing.T, store storage.Interface, inc
 		t.Errorf("Unexpected error: %v", err)
 	}
 	continueRV, _ := strconv.Atoi(list.ResourceVersion)
-	secondContinuation, err := storage.EncodeContinue("/second/foo", "/second/", int64(continueRV))
+	var rc int64
+	if list.RemainingItemCount != nil {
+		rc = *list.RemainingItemCount
+	}
+	secondContinuation, err := storage.EncodeContinue("/second/foo", "/second/", int64(continueRV), rc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1063,7 +1211,7 @@ func RunTestList(ctx context.Context, t *testing.T, store storage.Interface, inc
 				Field:    fields.OneTermEqualSelector("metadata.name", "foo"),
 				Label:    labels.Everything(),
 				Limit:    2,
-				Continue: encodeContinueOrDie("third/barfoo", int64(continueRV)),
+				Continue: encodeContinueOrDie("third/barfoo", int64(continueRV), rc),
 			},
 			expectedOut: []example.Pod{*createdPods[4]},
 		},
@@ -1074,7 +1222,7 @@ func RunTestList(ctx context.Context, t *testing.T, store storage.Interface, inc
 				Field:    fields.OneTermEqualSelector("metadata.name", "foo"),
 				Label:    labels.Everything(),
 				Limit:    1,
-				Continue: encodeContinueOrDie("third/barfoo", int64(continueRV)),
+				Continue: encodeContinueOrDie("third/barfoo", int64(continueRV), rc),
 			},
 			expectedOut: []example.Pod{*createdPods[4]},
 		},
@@ -1085,7 +1233,7 @@ func RunTestList(ctx context.Context, t *testing.T, store storage.Interface, inc
 				Field:    fields.OneTermEqualSelector("metadata.name", "foo"),
 				Label:    labels.Everything(),
 				Limit:    2,
-				Continue: encodeContinueOrDie("third/barfoo", int64(continueRV)),
+				Continue: encodeContinueOrDie("third/barfoo", int64(continueRV), rc),
 			},
 			expectedOut: []example.Pod{*createdPods[4]},
 		},
@@ -2110,12 +2258,13 @@ func RunTestListContinuation(ctx context.Context, t *testing.T, store storage.In
 	if len(out.Continue) != 0 {
 		t.Fatalf("Unexpected continuation token set")
 	}
-	key, rv, err := storage.DecodeContinue(continueFromSecondItem, "/pods")
-	t.Logf("continue token was %d %s %v", rv, key, err)
+	key, rv, rc, err := storage.DecodeContinue(continueFromSecondItem, "/pods")
+	t.Logf("continue token was %d %s %d %v", rv, key, rc, err)
 	expectNoDiff(t, "incorrect second page", []example.Pod{*preset[1].storedObj, *preset[2].storedObj}, out.Items)
 	if out.ResourceVersion != currentRV {
 		t.Errorf("Expect output.ResourceVersion = %s, but got %s", currentRV, out.ResourceVersion)
 	}
+
 	if validation != nil {
 		validation(t, 0, 2)
 	}
